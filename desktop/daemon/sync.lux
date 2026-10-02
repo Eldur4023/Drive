@@ -1,0 +1,404 @@
+# El algoritmo de sincronización, por cada carpeta enlazada.
+#
+# Tres versiones de cada ruta: LOCAL (lo que hay en disco), REMOTO (lo que hay en
+# Drive) y BASE (`entries`: lo último que se sincronizó). Con ellas se distingue
+# «lo he borrado yo» de «es nuevo en el otro lado»:
+#
+#   local  remoto  base   qué pasó                       qué se hace
+#   ─────  ──────  ─────  ─────────────────────────────  ──────────────────────────
+#   sí     no      no     nuevo en local                 subir
+#   no     sí      no     nuevo en Drive                 descargar
+#   sí     no      sí     lo borraron en Drive           borrar local (a la papelera
+#                         (si local cambió: resucita)    local) / subir si cambió
+#   no     sí      sí     lo borré en local              borrar en Drive (papelera)
+#                         (si Drive cambió: resucita)    / descargar si cambió
+#   sí     sí      -      mismo contenido                nada (se anota la base)
+#   sí     sí      sí     cambió uno                     subir o descargar
+#   sí     sí      -      cambiaron los dos              conflicto: gana el más
+#                                                        reciente y el otro se guarda
+#
+# Nada se pierde sin rastro: Drive archiva la versión anterior al sobrescribir y
+# lo borrado va a su papelera; en local, a .drive-sync-trash/ dentro de la carpeta.
+
+# ---- disco local ---------------------------------------------------------
+
+# Lo que es del servicio y no se sincroniza: la papelera local y las descargas a medias.
+fn bool skipped(string rel):
+    if rel.ends_with(".drivepart"):
+        return true
+    return rel.starts_with(".drive-sync") or rel.contains("/.drive-sync")
+
+# Todo lo que hay bajo `root`: ruta relativa → {is_dir, size, mtime}.
+# ponytail: recorrido completo en cada pasada (cada 5 s); con cientos de miles de
+# ficheros convendría inotify (un módulo nativo) en lugar de sondear.
+fn Json scan_local(string root):
+    Dict<string, Json> out = {}
+    List<string> names = os.list_dir(root, true)
+    for string rel in names:
+        if skipped(rel):
+            continue
+        string full = os.path_join(root, rel)
+        if os.is_dir(full):
+            out[rel] = { "is_dir": true, "size": 0, "mtime": 0 }
+        else:
+            int size = os.file_size(full)
+            if size >= 0:
+                out[rel] = { "is_dir": false, "size": size, "mtime": os.mtime_ms(full) }
+    return out
+
+# sha256 del contenido (el mismo que guarda Drive). "" si no se pudo leer.
+fn string file_hash(string full):
+    Json r = await os.run("sha256sum", ["--", full], { "timeout_ms": 120000 })
+    if r["status"] != 0:
+        return ""
+    List<string> parts = str(r["stdout"]).split(" ")
+    return parts[0]
+
+# ---- base de la sincronización ---------------------------------------------
+
+fn Json load_entries(int link_id):
+    Dict<string, Json> out = {}
+    List<Json> rows = await sqlite.query("select * from entries where link_id = ?", link_id)
+    for Json row in rows:
+        out[str(row["path"])] = row
+    return out
+
+fn bool remember(int link_id, string path, bool is_dir, string content_hash, int size, int mtime, string remote_id):
+    await sqlite.exec("""
+        insert into entries (link_id, path, is_dir, hash, size, mtime, remote_id) values (?, ?, ?, ?, ?, ?, ?)
+        on conflict(link_id, path) do update set is_dir = excluded.is_dir, hash = excluded.hash,
+            size = excluded.size, mtime = excluded.mtime, remote_id = excluded.remote_id
+        """, link_id, path, is_dir ? 1 : 0, content_hash, size, mtime, remote_id)
+    return true
+
+fn bool forget(int link_id, string path):
+    await sqlite.exec("delete from entries where link_id = ? and path = ?", link_id, path)
+    return true
+
+# ¿Hay algo que sincronizar por el lado local? Se mira a cada tick sin tocar la red.
+fn bool local_changed(Json local, Json base):
+    for string rel in local.keys():
+        if not base.has(rel):
+            return true
+        if not local[rel]["is_dir"]:
+            if local[rel]["size"] != base[rel]["size"] or local[rel]["mtime"] != base[rel]["mtime"]:
+                return true
+    for string rel in base.keys():
+        if not local.has(rel):
+            return true
+    return false
+
+# ---- operaciones sobre un fichero --------------------------------------------
+
+fn bool fail(Json c, string rel, string message):
+    c["errors"] = int(c["errors"]) + 1
+    if c["first_error"] == "":
+        c["first_error"] = rel + ": " + message
+    await note(int(c["link"]), "error", rel + ": " + message)
+    return false
+
+# Local → Drive. `overwrite` si ya existe allí (Drive archiva la versión anterior).
+fn bool push(Json c, string root, string rid, string rel, Json local_entry, string content_hash, bool overwrite):
+    Json r = await remote_upload(rid, rel, os.path_join(root, rel), overwrite)
+    if not r["ok"]:
+        return await fail(c, rel, str(r["error"]))
+    # Se anotan el tamaño y la fecha vistos al escanear (no los de ahora): si el
+    # fichero cambió mientras subía, la próxima pasada lo ve distinto y lo vuelve a subir.
+    await remember(int(c["link"]), rel, false, content_hash, int(local_entry["size"]), int(local_entry["mtime"]), str(r["body"]["id"]))
+    c["up"] = int(c["up"]) + 1
+    return true
+
+# Drive → local, por un temporal para no dejar nunca un fichero a medias.
+fn bool pull(Json c, string root, string rel, Json remote_entry):
+    string full = os.path_join(root, rel)
+    string tmp = full + ".drivepart"
+    os.make_dir(os.path_dirname(full))
+    Json r = await remote_download(str(remote_entry["id"]), tmp)
+    if not r["ok"]:
+        return await fail(c, rel, str(r["error"]))
+    await os.move(tmp, full)
+    await remember(int(c["link"]), rel, false, str(remote_entry["hash"]), os.file_size(full), os.mtime_ms(full), str(remote_entry["id"]))
+    c["down"] = int(c["down"]) + 1
+    return true
+
+# El borrado local no es definitivo: se aparta en .drive-sync-trash/<momento>/.
+fn bool trash_local(Json c, string root, string rel):
+    string dest = os.path_join(root, ".drive-sync-trash/" + str(time.now()) + "/" + rel)
+    os.make_dir(os.path_dirname(dest))
+    await os.move(os.path_join(root, rel), dest)
+    await forget(int(c["link"]), rel)
+    c["del_local"] = int(c["del_local"]) + 1
+    return true
+
+fn bool trash_remote(Json c, string rel, string remote_id):
+    Json r = await remote_trash(remote_id)
+    if not r["ok"]:
+        return await fail(c, rel, str(r["error"]))
+    await forget(int(c["link"]), rel)
+    c["del_remote"] = int(c["del_remote"]) + 1
+    return true
+
+# «informe.pdf» → «informe (conflicto 2026-10-02 18-30).pdf», en la misma carpeta.
+fn string conflict_name(string rel):
+    string dir = os.path_dirname(rel)
+    string name = os.path_basename(rel)
+    string ext = os.path_ext(name)
+    string stem = name.slice(0, len(name) - len(ext))
+    string stamp = time.format(time.now(), "%Y-%m-%d %H-%M")
+    string renamed = stem + " (conflicto " + stamp + ")" + ext
+    if dir == "" or dir == ".":
+        return renamed
+    return dir + "/" + renamed
+
+# Decide y hace lo que toque con una ruta que no es carpeta.
+fn bool sync_file(Json c, string root, string rid, string rel, Json L, Json R, Json S):
+    string full = os.path_join(root, rel)
+
+    # Recién escrito: puede estar a medias. Se deja para la pasada siguiente.
+    if L != null and time.now() - int(L["mtime"]) < 2000:
+        return true
+
+    string lh = ""
+    if L != null:
+        if S != null and S["size"] == L["size"] and S["mtime"] == L["mtime"]:
+            lh = str(S["hash"])
+        else:
+            lh = await file_hash(full)
+            if lh == "":
+                return true
+    string rh = ""
+    if R != null:
+        rh = str(R["hash"])
+    string bh = ""
+    if S != null:
+        bh = str(S["hash"])
+
+    if L != null and R != null:
+        if lh == rh:
+            if S == null or bh != lh:
+                await remember(int(c["link"]), rel, false, lh, int(L["size"]), int(L["mtime"]), str(R["id"]))
+            return true
+        bool lchg = S == null or lh != bh
+        bool rchg = S == null or rh != bh
+        if lchg and not rchg:
+            return await push(c, root, rid, rel, L, lh, true)
+        if rchg and not lchg:
+            return await pull(c, root, rel, R)
+        # Cambiaron los dos lados: gana el más reciente y el otro no se pierde.
+        c["conflicts"] = int(c["conflicts"]) + 1
+        if int(L["mtime"]) >= int(float(R["updated_at"]) * 1000):
+            await note(int(c["link"]), "warn", "conflicto en " + rel + ": gana la copia local; Drive guarda la anterior como versión")
+            return await push(c, root, rid, rel, L, lh, true)
+        string copy = conflict_name(rel)
+        await os.move(full, os.path_join(root, copy))
+        await note(int(c["link"]), "warn", "conflicto en " + rel + ": gana Drive; tu copia queda como " + copy)
+        return await pull(c, root, rel, R)
+
+    if L != null:
+        # Sólo local. Nuevo, o cambiado después de que lo borraran en Drive: se sube.
+        if S == null or lh != bh:
+            return await push(c, root, rid, rel, L, lh, false)
+        return await trash_local(c, root, rel)
+
+    if R != null:
+        # Sólo en Drive. Nuevo, o cambiado después de que lo borrara yo: se baja.
+        if S == null or rh != bh:
+            return await pull(c, root, rel, R)
+        return await trash_remote(c, rel, str(R["id"]))
+
+    if S != null:
+        await forget(int(c["link"]), rel)
+    return true
+
+# ---- una pasada completa sobre una carpeta enlazada --------------------------
+
+fn Json sync_link(Json link):
+    int lid = int(link["id"])
+    string root = str(link["local_path"])
+    string rid = str(link["remote_id"])
+    Json c = { "link": lid, "up": 0, "down": 0, "del_local": 0, "del_remote": 0, "conflicts": 0, "errors": 0, "first_error": "", "offline": false }
+
+    Json tree = await remote_tree(rid)
+    if not tree["ok"]:
+        c["errors"] = 1
+        c["first_error"] = str(tree["error"])
+        c["offline"] = true
+        return c
+    Dict<string, Json> remote = {}
+    List<Json> items = tree["body"]["items"]
+    for Json it in items:
+        remote[str(it["path"])] = it
+    Json local = scan_local(root)
+    Json base = await load_entries(lid)
+
+    # Salvaguardas: una carpeta que de golpe aparece vacía (disco sin montar, Drive
+    # que devuelve una lista vacía por un fallo) se confundiría con «lo borraron todo».
+    # ponytail: se pide intervención humana; un umbral de borrado masivo afinaría esto.
+    bool had_files = false
+    for string rel in base.keys():
+        if not base[rel]["is_dir"]:
+            had_files = true
+    if had_files and len(local.keys()) == 0:
+        c["errors"] = 1
+        c["first_error"] = "la carpeta local está vacía pero antes tenía ficheros: no se toca nada (¿disco sin montar?)"
+        return c
+    if had_files and len(remote.keys()) == 0:
+        c["errors"] = 1
+        c["first_error"] = "Drive devuelve la carpeta vacía pero antes tenía ficheros: no se toca nada"
+        return c
+
+    # Todas las rutas que existen en algún lado, separando carpetas de ficheros.
+    Dict<string, bool> seen = {}
+    List<string> files = []
+    List<string> dirs = []
+    List<Json> sources = [local, remote, base]
+    for Json src in sources:
+        for string rel in src.keys():
+            if seen.has(rel):
+                continue
+            seen[rel] = true
+            bool is_dir = false
+            if local.has(rel) and local[rel]["is_dir"]:
+                is_dir = true
+            if remote.has(rel) and remote[rel]["is_dir"]:
+                is_dir = true
+            if base.has(rel) and base[rel]["is_dir"]:
+                is_dir = true
+            if is_dir:
+                dirs.add(rel)
+            else:
+                files.add(rel)
+
+    # Primero las carpetas nuevas, de padres a hijos: si se subieran antes los ficheros,
+    # el servidor crearía esas carpetas por su cuenta y luego saldrían duplicadas ("sub (2)").
+    dirs.sort()
+    Dict<string, string> made = {}
+    List<string> gone_local = []
+    List<string> gone_remote = []
+    for string rel in dirs:
+        try:
+            Json L = local.get(rel, null)
+            Json R = remote.get(rel, null)
+            Json S = base.get(rel, null)
+            string parent = os.path_dirname(rel)
+            if L != null and R != null:
+                if S == null:
+                    await remember(lid, rel, true, "", 0, 0, str(R["id"]))
+                made[rel] = str(R["id"])
+            else if L != null:
+                if S == null:
+                    string parent_id = rid
+                    if parent != "" and parent != ".":
+                        parent_id = made.get(parent, "")
+                    if parent_id != "" or parent == "" or parent == ".":
+                        Json r = await remote_mkdir(parent_id, os.path_basename(rel))
+                        if r["ok"]:
+                            made[rel] = str(r["body"]["id"])
+                            await remember(lid, rel, true, "", 0, 0, str(r["body"]["id"]))
+                        else:
+                            await fail(c, rel, str(r["error"]))
+                else:
+                    gone_remote.add(rel)
+            else if R != null:
+                if S == null:
+                    os.make_dir(os.path_join(root, rel))
+                    await remember(lid, rel, true, "", 0, 0, str(R["id"]))
+                    made[rel] = str(R["id"])
+                else:
+                    gone_local.add(rel)
+            else:
+                await forget(lid, rel)
+        catch e:
+            await fail(c, rel, e.message)
+
+    for string rel in files:
+        try:
+            await sync_file(c, root, rid, rel, local.get(rel, null), remote.get(rel, null), base.get(rel, null))
+        catch e:
+            await fail(c, rel, e.message)
+
+    # Carpetas que desaparecieron de un lado: de hijos a padres y sólo si quedaron vacías.
+    gone_remote.reverse()
+    for string rel in gone_remote:
+        # Borrada en Drive. Si en local aún hay cosas (nuevas), se conserva y se reanota.
+        string full = os.path_join(root, rel)
+        if os.is_dir(full) and len(os.list_dir(full)) == 0:
+            os.remove_dir(full)
+        await forget(lid, rel)
+    gone_local.reverse()
+    for string rel in gone_local:
+        # Borrada en local. Si en Drive hay algo que no estaba en la base, se conserva.
+        bool fresh = false
+        for string other in remote.keys():
+            if other.starts_with(rel + "/") and not base.has(other):
+                fresh = true
+        if fresh:
+            os.make_dir(os.path_join(root, rel))
+            await forget(lid, rel)
+        else:
+            Json r = await remote_trash(str(remote[rel]["id"]))
+            if r["ok"]:
+                await forget(lid, rel)
+            else:
+                await fail(c, rel, str(r["error"]))
+    return c
+
+# ---- el reloj ------------------------------------------------------------------
+
+fn bool tick_link(Json link, int now, int poll):
+    int lid = int(link["id"])
+    string root = str(link["local_path"])
+    if not os.is_dir(root):
+        await sqlite.exec("update links set status = 'carpeta no encontrada', last_error = ? where id = ?", "no existe " + root, lid)
+        return false
+
+    bool force = int(link["force"]) == 1
+    bool due = now - int(link["last_attempt"]) >= poll
+    Json local = scan_local(root)
+    Json base = await load_entries(lid)
+    bool changed = local_changed(local, base)
+    # Tras un error se espera un poco antes de reintentar por un cambio local.
+    bool cooling = str(link["last_error"]) != "" and now - int(link["last_attempt"]) < 30000
+    if not (force or due or (changed and not cooling)):
+        return true
+
+    await sqlite.exec("update links set status = 'sincronizando', last_attempt = ? where id = ?", now, lid)
+    Json c = await sync_link(link)
+
+    if c["offline"]:
+        await sqlite.exec("update links set status = 'sin conexión', last_error = ?, force = 0 where id = ?", c["first_error"], lid)
+        await put_setting("online", "0")
+        return false
+    await put_setting("online", "1")
+
+    string status = "al día"
+    if int(c["errors"]) > 0:
+        status = "con errores"
+    await sqlite.exec("update links set status = ?, last_sync = ?, last_error = ?, force = 0 where id = ?", status, time.now(), c["first_error"], lid)
+    int work = int(c["up"]) + int(c["down"]) + int(c["del_local"]) + int(c["del_remote"]) + int(c["conflicts"])
+    if work > 0:
+        await note(lid, "info", root + ": ↑" + str(c["up"]) + " ↓" + str(c["down"]) + " borrados " + str(int(c["del_local"]) + int(c["del_remote"])) + " conflictos " + str(c["conflicts"]))
+    return true
+
+fn bool tick():
+    bool ready = await configured()
+    if not ready:
+        return true
+    string poll_text = await setting("poll_seconds", "60")
+    int poll = int(poll_text) * 1000
+    int now = time.now()
+    List<Json> links = await sqlite.query("select * from links where enabled = 1 order by id")
+    for Json link in links:
+        try:
+            await tick_link(link, now, poll)
+        catch e:
+            await note(int(link["id"]), "error", "fallo inesperado: " + e.message)
+    return true
+
+# Una sola tarea para todo: así dos pasadas nunca se solapan. Cada 5 s se mira el
+# disco (barato, sin red); la red sólo se toca si hay cambios locales, si toca el
+# sondeo de Drive (poll_seconds, 60 por defecto) o si la app pidió «sincronizar ya».
+# Al arrancar la máquina `last_attempt` es antiguo, así que la primera pasada pone
+# al día las carpetas con lo que cambió en Drive mientras estuvo apagada.
+every "5s":
+    await tick()

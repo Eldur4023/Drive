@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block title %}{{ node.name }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/files">Mis ficheros</a>
+  {% for crumb in breadcrumbs %}
+    <span class="sep">/</span>
+    {% if loop.last %}<span>{{ crumb.name }}</span>
+    {% else %}<a href="/files/{{ crumb.id }}">{{ crumb.name }}</a>{% endif %}
+  {% endfor %}
+</div>
+
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">{{ node|icon }} {{ node.name }}</h2>
+    <div class="row">
+      {% if not node.is_dir %}
+        <a class="button primary" href="/files/{{ node.id }}/download">Descargar</a>
+        <a class="button" href="/files/{{ node.id }}/preview" target="_blank" rel="noopener">Abrir</a>
+      {% else %}
+        <a class="button" href="/files/{{ node.id }}">Abrir carpeta</a>
+      {% endif %}
+    </div>
+  </div>
+
+  <table style="margin-top:12px">
+    <tr><th>Propietario</th><td>{{ owner.label if owner else '—' }}</td></tr>
+    <tr><th>Tamaño</th><td>{{ '—' if node.is_dir else node.size|size }}</td></tr>
+    <tr><th>Tipo</th><td>{{ 'Carpeta' if node.is_dir else (node.mime_type or 'desconocido') }}</td></tr>
+    <tr><th>Creado</th><td>{{ node.created_at|datetime }}</td></tr>
+    <tr><th>Modificado</th><td>{{ node.updated_at|datetime }}</td></tr>
+    <tr><th>Tu acceso</th>
+      <td>
+        {{ access.permission.value if access.permission else 'ninguno' }}
+        <span class="muted">
+          ({% if access.source == 'owner' %}eres el propietario
+          {%- elif access.source == 'admin' %}por ser administrador
+          {%- elif access.source == 'share' %}compartido contigo
+          {%- elif access.source == 'public' %}es público
+          {%- elif access.source == 'network' %}por estar en la red de confianza
+          {%- elif access.source == 'link' %}por un enlace{% endif %})
+        </span>
+      </td>
+    </tr>
+  </table>
+
+  {% if not node.is_dir and node.mime_type and node.mime_type.startswith('image/') %}
+    <p style="margin-top:14px">
+      <img class="preview-box" src="/files/{{ node.id }}/preview" alt="{{ node.name }}">
+    </p>
+  {% endif %}
+</div>
+
+{% if can_manage %}
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Organizar</h2>
+    <form method="post" action="/files/{{ node.id }}/rename" class="row">
+      <input name="name" value="{{ node.name }}" required>
+      <button type="submit">Renombrar</button>
+    </form>
+
+    <h3>Mover o copiar</h3>
+    <p class="muted">Indica el identificador de la carpeta destino; déjalo vacío para la raíz.</p>
+    <form method="post" action="/files/{{ node.id }}/move" class="row">
+      <input name="target_id" placeholder="id de la carpeta destino">
+      <button type="submit">Mover</button>
+    </form>
+    <form method="post" action="/files/{{ node.id }}/copy" class="row" style="margin-top:8px">
+      <input name="target_id" placeholder="id de la carpeta destino">
+      <button type="submit">Copiar</button>
+    </form>
+
+    <h3>Este elemento</h3>
+    <p class="muted mono">{{ node.id }}</p>
+    <form class="inline" method="post" action="/files/{{ node.id }}/star">
+      <button type="submit">{{ 'Quitar de destacados' if node.starred else 'Destacar' }}</button>
+    </form>
+    {% if can.delete %}
+      <form class="inline" method="post" action="/files/{{ node.id }}/trash"
+            data-confirm="¿Enviar a la papelera?">
+        <button class="danger" type="submit">Enviar a la papelera</button>
+      </form>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Visibilidad</h2>
+    <form method="post" action="/files/{{ node.id }}/visibility">
+      <div class="field inline">
+        <input type="checkbox" id="is_public" name="is_public" value="true"
+               {% if node.is_public %}checked{% endif %}
+               {% if not can.share_public %}disabled{% endif %}>
+        <label for="is_public">Público: accesible por cualquiera sin cuenta</label>
+      </div>
+      <div class="field inline">
+        <input type="checkbox" id="lan_visible" name="lan_visible" value="true"
+               {% if node.lan_visible %}checked{% endif %}>
+        <label for="lan_visible">Visible sin login desde las redes de confianza</label>
+      </div>
+      <p class="muted">
+        Modo de red actual: <b>{{ config.network.trusted_mode }}</b>
+        {%- if config.network.trusted_mode == 'none' %} (el acceso por red está desactivado){% endif %}.
+      </p>
+      <button class="primary" type="submit">Guardar visibilidad</button>
+    </form>
+
+    {% if node.is_public %}
+      <div class="notice ok" style="margin-top:12px">
+        Enlace público:
+        <span class="mono">{{ config.app.base_url }}/p/{{ node.id }}</span>
+        <button class="small" data-copy="{{ config.app.base_url }}/p/{{ node.id }}">Copiar</button>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Compartir con usuarios</h2>
+  {% if can.share %}
+    <form method="post" action="/files/{{ node.id }}/share" class="row">
+      <input name="username" list="userlist" placeholder="usuario" required>
+      <datalist id="userlist">
+        {% for u in users %}<option value="{{ u.username }}">{{ u.label }}</option>{% endfor %}
+      </datalist>
+      <select name="permission">
+        <option value="read">Sólo lectura</option>
+        <option value="write">Lectura y escritura</option>
+      </select>
+      <input name="expires_days" type="number" min="0" value="0" title="Días hasta caducar (0 = sin caducidad)" style="width:110px">
+      <input name="message" placeholder="Mensaje (opcional)">
+      <button class="primary" type="submit">Compartir</button>
+    </form>
+  {% else %}
+    <p class="muted">La compartición entre usuarios no está disponible para tu perfil.</p>
+  {% endif %}
+
+  {% if shares %}
+    <div class="table-wrap" style="margin-top:14px">
+      <table>
+        <thead><tr><th>Usuario</th><th>Permiso</th><th>Caduca</th><th class="right"></th></tr></thead>
+        <tbody>
+          {% for share in shares %}
+          <tr>
+            <td>{{ share.user.label }}</td>
+            <td>{{ 'lectura' if share.permission.value == 'read' else 'escritura' }}</td>
+            <td class="muted">{{ share.expires_at|datetime if share.expires_at else 'sin caducidad' }}</td>
+            <td class="right">
+              <form class="inline" method="post" action="/shares/{{ share.id }}/delete">
+                <button class="small danger" type="submit">Retirar</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Enlaces con token</h2>
+  {% if can.share_public %}
+    <form method="post" action="/files/{{ node.id }}/link">
+      <div class="grid cols-3">
+        <div class="field">
+          <label for="mode">Tipo</label>
+          <select id="mode" name="mode">
+            <option value="download">Sólo descarga</option>
+            {% if node.is_dir and config.sharing.allow_upload_links %}
+              <option value="upload">Sólo subida (buzón)</option>
+              <option value="both">Descarga y subida</option>
+            {% endif %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="password">Contraseña {% if config.sharing.require_password_on_public_links %}(obligatoria){% endif %}</label>
+          <input id="password" name="password" type="password" autocomplete="new-password">
+        </div>
+        <div class="field">
+          <label for="expires_days">Caduca en (días, 0 = por defecto)</label>
+          <input id="expires_days" name="expires_days" type="number" min="0" value="0">
+        </div>
+        <div class="field">
+          <label for="download_limit">Límite de descargas (0 = sin límite)</label>
+          <input id="download_limit" name="download_limit" type="number" min="0" value="0">
+        </div>
+        <div class="field">
+          <label for="allowed_networks">Restringir a redes (CIDR, coma)</label>
+          <input id="allowed_networks" name="allowed_networks" placeholder="p. ej. 88.1.2.0/24">
+        </div>
+        <div class="field">
+          <label for="note">Nota interna</label>
+          <input id="note" name="note">
+        </div>
+      </div>
+      {% if node.is_dir %}
+        <div class="field inline">
+          <input type="checkbox" id="allow_listing" name="allow_listing" value="true" checked>
+          <label for="allow_listing">Permitir ver el contenido de la carpeta</label>
+        </div>
+      {% endif %}
+      <button class="primary" type="submit">Crear enlace</button>
+    </form>
+  {% else %}
+    <p class="muted">Tu perfil no puede crear enlaces públicos.</p>
+  {% endif %}
+
+  {% if links %}
+    <div class="table-wrap" style="margin-top:14px">
+      <table>
+        <thead>
+          <tr><th>Enlace</th><th>Tipo</th><th>Caduca</th><th>Descargas</th><th class="right"></th></tr>
+        </thead>
+        <tbody>
+          {% for link in links %}
+          <tr>
+            <td>
+              <span class="mono">{{ config.app.base_url }}/s/{{ link.token }}</span>
+              <button class="small" data-copy="{{ config.app.base_url }}/s/{{ link.token }}">Copiar</button>
+              {% if link.password_hash %}<span class="tag">con contraseña</span>{% endif %}
+              {% if link.allowed_networks %}<span class="tag">red restringida</span>{% endif %}
+            </td>
+            <td>{{ link.mode.value }}</td>
+            <td class="muted">{{ link.expires_at|datetime if link.expires_at else 'sin caducidad' }}</td>
+            <td>{{ link.download_count }}{% if link.download_limit %} / {{ link.download_limit }}{% endif %}</td>
+            <td class="right">
+              <form class="inline" method="post" action="/links/{{ link.id }}/revoke">
+                <button class="small danger" type="submit">Revocar</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if versions %}
+<div class="card">
+  <h2>Versiones anteriores</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Fecha</th><th>Tamaño</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for version in versions %}
+        <tr>
+          <td>{{ version.created_at|datetime }} <span class="muted">({{ version.created_at|relative }})</span></td>
+          <td>{{ version.size|size }}</td>
+          <td class="right">
+            <form class="inline" method="post"
+                  action="/files/{{ node.id }}/versions/{{ version.id }}/restore"
+                  data-confirm="¿Restaurar esta versión? La actual se guardará como versión.">
+              <button class="small" type="submit">Restaurar</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Auditoría · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row" style="margin-bottom:16px">
+  <a class="button" href="/admin">Resumen</a>
+  <a class="button" href="/admin/users">Usuarios</a>
+  <a class="button" href="/admin/settings">Ajustes</a>
+  <a class="button primary" href="/admin/audit">Auditoría</a>
+</div>
+
+<div class="card">
+  <form method="get" action="/admin/audit" class="row">
+    <select name="event">
+      <option value="">Todos los eventos</option>
+      {% for name in events %}
+        <option value="{{ name }}" {% if event == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <input name="user" value="{{ user }}" placeholder="usuario">
+    <button class="primary" type="submit">Filtrar</button>
+  </form>
+
+  <div class="table-wrap" style="margin-top:14px">
+    <table>
+      <thead>
+        <tr><th>Cuándo</th><th>Evento</th><th>Usuario</th><th class="hide-sm">IP</th><th>Objetivo</th><th class="hide-sm">Detalle</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td class="muted">{{ row.at|datetime('%d/%m/%Y %H:%M:%S') }}</td>
+          <td>{{ row.event }}</td>
+          <td>{{ names.get(row.user_id) or row.actor or '—' }}</td>
+          <td class="hide-sm mono muted">{{ row.ip or '—' }}</td>
+          <td class="muted">{{ row.target_type or '' }} {{ (row.target_id or '')[:16] }}</td>
+          <td class="hide-sm muted">{{ row.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="row" style="margin-top:14px">
+    {% if page > 1 %}
+      <a class="button" href="/admin/audit?page={{ page - 1 }}&event={{ event }}&user={{ user }}">Anterior</a>
+    {% endif %}
+    <span class="muted">Página {{ page }}</span>
+    {% if rows|length == 100 %}
+      <a class="button" href="/admin/audit?page={{ page + 1 }}&event={{ event }}&user={{ user }}">Siguiente</a>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

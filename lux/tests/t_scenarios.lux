@@ -1,0 +1,209 @@
+# Escenarios con una configuración distinta de la de por defecto: cada uno se
+# ejecuta contra su propia instancia (ver tests/run.sh y tests/scenarios/*.json).
+
+fn bool t_lockout(Json res):
+    string victima = uname("victima")
+    Json c = client("203.0.113.9")
+    await register(c, victima, "Contrasena1")
+    Json attacker = client("203.0.113.9")
+    for int i in range(3):
+        await post(attacker, "/login", { "username": victima, "password": "malaClave9", "next": "/" })
+    # La contraseña correcta tampoco entra mientras dure el bloqueo.
+    Json r = await post(attacker, "/login", { "username": victima, "password": "Contrasena1", "next": "/" })
+    check(res, "bloqueo tras varios fallos", r["status"] == 401 and r["text"].contains("Demasiados intentos"), brief(r))
+    check(res, "bloqueo: no abre sesión", not attacker["cookies"].has("drive_session"), "")
+    return true
+
+fn bool t_closed(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "elprimero", "Contrasena1")
+    check(res, "registro cerrado: la primera cuenta siempre se permite", await login(c, "elprimero", "Contrasena1"), "")
+    Json r = await get(client("203.0.113.9"), "/register")
+    check(res, "registro cerrado: el resto -> 403", r["status"] == 403 and r["text"].contains("Registro cerrado"), brief(r))
+    Json p = await post(client("203.0.113.9"), "/register", { "username": "otro", "email": "", "password": "Contrasena1", "password2": "Contrasena1" })
+    check(res, "registro cerrado: tampoco por POST", p["status"] == 403, brief(p))
+    return true
+
+fn bool t_approval(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "jefe", "Contrasena1")
+    Json p = client("203.0.113.9")
+    Json r = await post(p, "/register", { "username": "pendiente", "email": "", "password": "Contrasena1", "password2": "Contrasena1" })
+    check(res, "aprobación: la cuenta queda pendiente", r["text"].contains("pendiente"), brief(r))
+    Json l = await post(client("203.0.113.9"), "/login", { "username": "pendiente", "password": "Contrasena1", "next": "/" })
+    check(res, "aprobación: no puede entrar", l["status"] == 401 and l["text"].contains("aprobación"), brief(l))
+
+    # El admin la aprueba.
+    Json admin = client("203.0.113.9")
+    await login(admin, "jefe", "Contrasena1")
+    string html = (await get(admin, "/admin/users"))["text"]
+    string pid = between(html.slice(html.index_of("pendiente")), "action=\"/admin/users/", "\"")
+    await post(admin, "/admin/users/" + pid, { "role": "user", "is_active": "true", "is_approved": "true" })
+    check(res, "aprobación: tras aprobarla entra", await login(client("203.0.113.9"), "pendiente", "Contrasena1"), "")
+    return true
+
+fn bool t_quota(Json res):
+    Json jefe = client("203.0.113.9")
+    await register(jefe, "jefe", "Contrasena1")
+    Json c = client("203.0.113.9")
+    await register(c, "limitado", "Contrasena1")
+    await login(c, "limitado", "Contrasena1")
+    Json r = await api_upload(c, "grande.bin", "x".repeat(2048), "")
+    check(res, "cuota: rechaza lo que no cabe", r["status"] == 400 and str(r["body"]["detail"]).lower().contains("espacio"), brief(r))
+    Json ok = await api_upload(c, "pequeno.bin", "x".repeat(100), "")
+    check(res, "cuota: lo que cabe entra", ok["status"] == 201, brief(ok))
+    Json again = await api_upload(c, "otro.bin", "y".repeat(1000), "")
+    check(res, "cuota: cuenta lo ya usado", again["status"] == 400, brief(again))
+    string rejected = hash.sha256("x".repeat(2048))
+    int leftovers = 0
+    for string f in os.list_dir(os.getenv("TEST_BLOBS", ""), true):
+        if f.ends_with(rejected):
+            leftovers = leftovers + 1
+    check(res, "cuota: un rechazo no deja blob suelto", leftovers == 0, "blobs: " + str(leftovers))
+    return true
+
+fn bool t_maxsize(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "ana", "Contrasena1")
+    await login(c, "ana", "Contrasena1")
+    Json r = await api_upload(c, "x.bin", "y".repeat(100), "")
+    check(res, "tamaño máximo por fichero", r["status"] == 400 and str(r["body"]["detail"]).contains("máximo"), brief(r))
+    return true
+
+fn bool t_nolinks(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "ana", "Contrasena1")
+    await login(c, "ana", "Contrasena1")
+    Json n = (await api_upload(c, "x.txt", "x", ""))["body"]
+    Json r = await post(c, "/api/files/" + n["id"] + "/links", {})
+    check(res, "enlaces públicos desactivados -> 403", r["status"] == 403, brief(r))
+    return true
+
+fn bool t_ratelimit(Json res):
+    Json c = client("203.0.113.20")
+    await register(c, "ana", "Contrasena1")
+    Json atk = client("203.0.113.9")
+    string last = ""
+    int blocked = 0
+    for int i in range(6):
+        Json r = await post(atk, "/login", { "username": "ana", "password": "mala" + str(i), "next": "/" })
+        if r["status"] == 429:
+            blocked = blocked + 1
+    check(res, "límite de login: se corta con 429", blocked > 0, "bloqueados: " + str(blocked))
+
+    await login(c, "ana", "Contrasena1")
+    Json n = (await api_upload(c, "x.txt", "x", ""))["body"]
+    int tooMany = 0
+    for int i in range(4):
+        Json d = await get(c, "/files/" + n["id"] + "/download")
+        if d["status"] == 429:
+            tooMany = tooMany + 1
+    check(res, "límite de descargas: 429 al pasarse", tooMany > 0, "429: " + str(tooMany))
+    return true
+
+get endpoint("/run/lockout"):
+    Json res = new_results("lockout")
+    await t_lockout(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/closed"):
+    Json res = new_results("closed")
+    await t_closed(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/approval"):
+    Json res = new_results("approval")
+    await t_approval(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/quota"):
+    Json res = new_results("quota")
+    await t_quota(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/maxsize"):
+    Json res = new_results("maxsize")
+    await t_maxsize(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/nolinks"):
+    Json res = new_results("nolinks")
+    await t_nolinks(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/ratelimit"):
+    Json res = new_results("ratelimit")
+    await t_ratelimit(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+# ── Retención de versiones y papelera ───────────────────────────────────────
+
+fn int usage(Json c):
+    return (await get(c, "/api/usage"))["body"]["used"]
+
+fn bool t_retention(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "ana", "Contrasena1")
+    await login(c, "ana", "Contrasena1")
+
+    # max_per_file = 2: el historial no pasa de dos versiones.
+    Json f = (await api_upload(c, "doc.txt", "uno", ""))["body"]
+    string trace = "3"
+    for string v in ["dos", "tres", "cuatro", "cinco"]:
+        Json ow = await upload_file(c, "/api/files", "file", "doc.txt", v, { "overwrite": "true" })
+        trace = trace + "," + str(await usage(c)) + "(" + str(ow["body"]["size"]) + ")"
+    Json detail = await get(c, "/files/" + f["id"] + "/detail")
+    check(res, "versiones: el historial se recorta a max_per_file", len(ids_after(detail["text"], "/versions/")) == 2, str(len(ids_after(detail["text"], "/versions/"))))
+    # 5 versiones en total, pero sólo se cuentan la actual y las dos conservadas.
+    # Quedan "cinco" (actual) y las dos últimas archivadas, "cuatro" y "tres".
+    check(res, "versiones: la cuota cuenta la actual y las conservadas", await usage(c) == 5 + 6 + 4, trace)
+
+    # Retención de la papelera: pasado el plazo, el mantenimiento la vacía.
+    Json g = (await api_upload(c, "viejo.txt", "contenido viejo " + hash.uuid(), ""))["body"]
+    await call(c, "DELETE", "/api/files/" + g["id"], null, {})
+    check(res, "papelera: el borrado va a la papelera", len((await get(c, "/api/trash"))["body"]["items"]) == 1, "")
+    await sleep(2500)
+    Json run = await cli(["maintenance"])
+    check(res, "papelera: el mantenimiento purga lo caducado", run["stdout"].contains("trash=1"), str(run))
+    check(res, "papelera: ya no está", len((await get(c, "/api/trash"))["body"]["items"]) == 0, "")
+    check(res, "papelera: el blob se libera", not run["stdout"].contains("blobs=0"), str(run))
+    return true
+
+fn bool t_notrash(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "ana", "Contrasena1")
+    await login(c, "ana", "Contrasena1")
+    Json f = (await api_upload(c, "doc.txt", "x".repeat(100), ""))["body"]
+    await upload_file(c, "/api/files", "file", "doc.txt", "y".repeat(40), { "overwrite": "true" })
+    check(res, "sin versiones: sobrescribir sustituye y libera lo anterior", await usage(c) == 40, str(await usage(c)))
+    Json d = await get(c, "/files/" + f["id"] + "/detail")
+    check(res, "sin versiones: no hay historial", not d["text"].contains("Versiones anteriores"), "")
+    await call(c, "DELETE", "/api/files/" + f["id"], null, {})
+    check(res, "sin papelera: el borrado es definitivo", len((await get(c, "/api/trash"))["body"]["items"]) == 0 and await usage(c) == 0, str(await usage(c)))
+    return true
+
+fn bool t_trashfree(Json res):
+    Json c = client("203.0.113.9")
+    await register(c, "ana", "Contrasena1")
+    await login(c, "ana", "Contrasena1")
+    Json f = (await api_upload(c, "doc.txt", "x".repeat(100), ""))["body"]
+    await call(c, "DELETE", "/api/files/" + f["id"], null, {})
+    check(res, "papelera sin cuota: lo borrado deja de contar", await usage(c) == 0, str(await usage(c)))
+    await post(c, "/api/files/" + f["id"] + "/restore", null)
+    check(res, "papelera sin cuota: al restaurar vuelve a contar", await usage(c) == 100, str(await usage(c)))
+    return true
+
+get endpoint("/run/retention"):
+    Json res = new_results("retention")
+    await t_retention(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/notrash"):
+    Json res = new_results("notrash")
+    await t_notrash(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/trashfree"):
+    Json res = new_results("trashfree")
+    await t_trashfree(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)

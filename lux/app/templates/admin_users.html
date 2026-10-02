@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Usuarios · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+{% include "admin_nav.html" %}
+
+<div class="card">
+  <h2>Crear usuario</h2>
+  <form method="post" action="/admin/users" class="row">
+    <input name="username" placeholder="usuario" required>
+    <input name="email" type="email" placeholder="correo (opcional)">
+    <input name="password" type="password" placeholder="contraseña" required autocomplete="new-password">
+    <select name="role">
+      {% for role in c["roles"] %}<option value="{{ role }}">{{ role }}</option>{% endfor %}
+    </select>
+    <input name="quota" placeholder="cuota (p. ej. 20GB)" style="width:150px">
+    <button class="primary" type="submit">Crear</button>
+  </form>
+</div>
+
+{% for user in c["users"] %}
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">
+      {{ user["label"] }} <span class="muted mono">{{ user["username"] }}</span>
+      {% if user["is_approved"] != 1 %}<span class="tag warn">pendiente</span>{% endif %}
+      {% if user["is_active"] != 1 %}<span class="tag warn">desactivado</span>{% endif %}
+      {% if user["totp_enabled"] == 1 %}<span class="tag">2FA</span>{% endif %}
+    </h2>
+    <span class="muted">
+      {{ user["usage_h"] }}{% if not user["unlimited"] %} / {{ user["quota_h"] }}{% endif %}
+    </span>
+  </div>
+
+  <form method="post" action="/admin/users/{{ user["id"] }}">
+    <div class="grid cols-3">
+      <div class="field">
+        <label>Rol</label>
+        <select name="role">
+          {% for role in c["roles"] %}
+            <option value="{{ role }}" {% if user["role"] == role %}selected{% endif %}>{{ role }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Cuota (vacío = la del rol)</label>
+        <input name="quota" value="{{ user["quota_override_h"] }}" placeholder="p. ej. 50GB">
+      </div>
+      <div class="field">
+        <label>Máximo por fichero (vacío = el del rol)</label>
+        <input name="max_upload" value="{{ user["max_upload_override_h"] }}">
+      </div>
+      <div class="field">
+        <label>Subir</label>
+        <select name="can_upload">
+          <option value="inherit" {% if user["ov"]["can_upload"] == "inherit" %}selected{% endif %}>Según el rol</option>
+          <option value="yes" {% if user["ov"]["can_upload"] == "yes" %}selected{% endif %}>Permitir</option>
+          <option value="no" {% if user["ov"]["can_upload"] == "no" %}selected{% endif %}>Denegar</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Borrar</label>
+        <select name="can_delete">
+          <option value="inherit" {% if user["ov"]["can_delete"] == "inherit" %}selected{% endif %}>Según el rol</option>
+          <option value="yes" {% if user["ov"]["can_delete"] == "yes" %}selected{% endif %}>Permitir</option>
+          <option value="no" {% if user["ov"]["can_delete"] == "no" %}selected{% endif %}>Denegar</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Compartir</label>
+        <select name="can_share_internal">
+          <option value="inherit" {% if user["ov"]["can_share_internal"] == "inherit" %}selected{% endif %}>Según el rol</option>
+          <option value="yes" {% if user["ov"]["can_share_internal"] == "yes" %}selected{% endif %}>Permitir</option>
+          <option value="no" {% if user["ov"]["can_share_internal"] == "no" %}selected{% endif %}>Denegar</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Enlaces públicos</label>
+        <select name="can_share_public">
+          <option value="inherit" {% if user["ov"]["can_share_public"] == "inherit" %}selected{% endif %}>Según el rol</option>
+          <option value="yes" {% if user["ov"]["can_share_public"] == "yes" %}selected{% endif %}>Permitir</option>
+          <option value="no" {% if user["ov"]["can_share_public"] == "no" %}selected{% endif %}>Denegar</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <label class="row" style="margin:0">
+        <input type="checkbox" name="is_active" value="true" {% if user["is_active"] == 1 %}checked{% endif %}> Activo
+      </label>
+      <label class="row" style="margin:0">
+        <input type="checkbox" name="is_approved" value="true" {% if user["is_approved"] == 1 %}checked{% endif %}> Aprobado
+      </label>
+      <button class="primary" type="submit">Guardar</button>
+    </div>
+  </form>
+
+  <h3>Acciones</h3>
+  <div class="row">
+    <form class="row" method="post" action="/admin/users/{{ user["id"] }}/password">
+      <input name="password" type="password" placeholder="nueva contraseña" required autocomplete="new-password">
+      <button type="submit">Restablecer contraseña</button>
+    </form>
+    <form class="inline" method="post" action="/admin/users/{{ user["id"] }}/recompute">
+      <button type="submit">Recalcular uso</button>
+    </form>
+    <form class="row" method="post" action="/admin/users/{{ user["id"] }}/delete"
+          data-confirm="Se borrará la cuenta y TODO su contenido. ¿Continuar?">
+      <input name="confirm" placeholder="escribe «{{ user["username"] }}»">
+      <button class="danger" type="submit">Eliminar cuenta</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

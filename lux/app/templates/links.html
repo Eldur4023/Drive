@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Mis enlaces · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>Enlaces que he creado</h2>
+  <p class="muted">Aquí puedes revisar y revocar todo lo que has compartido por enlace.</p>
+
+  {% if len(c["links"]) == 0 %}
+    <p class="muted">No has creado ningún enlace.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Contenido</th><th>Enlace</th><th class="hide-sm">Caduca</th><th class="hide-sm">Descargas</th><th class="right"></th></tr>
+      </thead>
+      <tbody>
+        {% for link in c["links"] %}
+        <tr>
+          <td>
+            {% if link["node_found"] %}
+              <div class="name-cell">
+                <span class="icon">{{ link["node_icon"] }}</span>
+                <a href="/files/{{ link["node_id"] }}/detail">{{ link["node_name"] }}</a>
+              </div>
+            {% else %}
+              <span class="muted">(eliminado)</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="mono">{{ link["url"] }}</span>
+            <button class="small" data-copy="{{ link["url"] }}">Copiar</button>
+            {% if link["has_password"] %}<span class="tag">contraseña</span>{% endif %}
+            {% if link["mode"] != "download" %}<span class="tag">{{ link["mode"] }}</span>{% endif %}
+          </td>
+          <td class="hide-sm muted">{{ link["expires_h"] }}</td>
+          <td class="hide-sm">{{ link["downloads_text"] }}</td>
+          <td class="right">
+            <form class="inline" method="post" action="/links/{{ link["id"] }}/revoke"
+                  data-confirm="¿Revocar este enlace?">
+              <button class="small danger" type="submit">Revocar</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

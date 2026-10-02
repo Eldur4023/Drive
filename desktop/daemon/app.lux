@@ -1,0 +1,33 @@
+# Drive Sync — servicio de sincronización de carpetas con Drive.
+#
+# Corre como servicio de sistema (ver ../deploy/) con `lux --no-watch ./daemon` y
+# no abre ninguna ventana: sincroniza solo, aunque no haya nadie con sesión
+# iniciada. La app de escritorio (../app) es sólo un mando a distancia que le
+# habla por HTTP en el bucle local.
+#
+#   store.lux    esquema, ajustes y registro de eventos
+#   remote.lux   cliente de la API de Drive
+#   sync.lux     el algoritmo: tres vías (local / último sincronizado / Drive)
+#   api.lux      API local para la app de escritorio
+
+import sqlite
+import os
+import time
+import json
+import http
+import hash
+
+app:
+    name   "Drive Sync"
+    port   env("DRIVE_SYNC_PORT", "7878")
+    # Sólo esta máquina: la API puede añadir carpetas a sincronizar.
+    host   "127.0.0.1"
+    max_body "1MB"
+
+    log:
+        level "info"
+        access false
+
+    sqlite:
+        file env("DRIVE_SYNC_DB", "./state.db")
+        pool 2

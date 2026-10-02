@@ -1,0 +1,91 @@
+# Cliente de la API de Drive (/api). Autentica con el token del usuario.
+#
+# Todas las llamadas devuelven {ok, error, body}: un fallo de red o un estado
+# inesperado no lanza nada, llega como ok=false con un mensaje legible.
+
+fn string server_url():
+    string url = await setting("server_url", "")
+    while url.ends_with("/"):
+        url = url.slice(0, len(url) - 1)
+    return url
+
+fn Json auth_headers():
+    string token = await setting("token", "")
+    return { "Authorization": "Bearer " + token, "Accept": "application/json" }
+
+fn bool configured():
+    string url = await server_url()
+    string token = await setting("token", "")
+    return url != "" and token != ""
+
+fn Json failed(string message):
+    return { "ok": false, "error": message, "body": null }
+
+# Convierte la respuesta HTTP en {ok, error, body}; `want` es el estado esperado.
+fn Json outcome(Json r, int want):
+    if r["status"] == want:
+        return { "ok": true, "error": "", "body": r["body"] }
+    string detail = ""
+    if r["body"] != null and r["body"]["detail"] != null:
+        detail = ": " + str(r["body"]["detail"])
+    return failed("Drive respondió " + str(r["status"]) + detail)
+
+fn Json api_get(string path):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json r = await http.get(base + path, headers, { "timeout_ms": 60000 })
+        return outcome(r, 200)
+    catch e:
+        return failed("sin conexión con Drive: " + e.message)
+
+# El árbol vivo bajo la carpeta enlazada, plano y con rutas relativas a ella.
+fn Json remote_tree(string root_id):
+    string path = "/api/sync/tree"
+    if root_id != "":
+        path = path + "?root_id=" + root_id
+    return await api_get(path)
+
+# Sube un fichero local. `rel` es su ruta relativa a la carpeta enlazada: el
+# servidor crea las carpetas intermedias que falten. body = el nodo creado.
+fn Json remote_upload(string root_id, string rel, string full, bool overwrite):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json fields = { "parent_id": root_id, "relpath": rel, "overwrite": overwrite ? "true" : "false" }
+        # ponytail: Lux limita cada petición a 120 s; un fichero que no suba en ese
+        # tiempo falla y se reintenta en la pasada siguiente. Trocear si llegara a ser un problema.
+        Json r = await http.post(base + "/api/files", fields, headers, { "files": { "file": full }, "timeout_ms": 120000 })
+        return outcome(r, 201)
+    catch e:
+        return failed("no se pudo subir: " + e.message)
+
+fn Json remote_download(string id, string dest):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json r = await http.get(base + "/api/files/" + id + "/content", headers, { "save_to": dest, "timeout_ms": 120000 })
+        if r["status"] != 200:
+            os.remove_file(dest)
+        return outcome(r, 200)
+    catch e:
+        return failed("no se pudo descargar: " + e.message)
+
+fn Json remote_mkdir(string parent_id, string name):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json r = await http.post(base + "/api/folders", { "parent_id": parent_id, "name": name }, headers, { "form": true, "timeout_ms": 30000 })
+        return outcome(r, 201)
+    catch e:
+        return failed("no se pudo crear la carpeta: " + e.message)
+
+# A la papelera de Drive (recuperable), no borrado definitivo.
+fn Json remote_trash(string id):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json r = await http.delete(base + "/api/files/" + id, headers, { "timeout_ms": 30000 })
+        return outcome(r, 200)
+    catch e:
+        return failed("no se pudo borrar: " + e.message)

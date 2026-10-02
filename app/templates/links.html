@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Mis enlaces · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>Enlaces que he creado</h2>
+  <p class="muted">Aquí puedes revisar y revocar todo lo que has compartido por enlace.</p>
+
+  {% if not links %}
+    <p class="muted">No has creado ningún enlace.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Contenido</th><th>Enlace</th><th class="hide-sm">Caduca</th><th class="hide-sm">Descargas</th><th class="right"></th></tr>
+      </thead>
+      <tbody>
+        {% for link in links %}
+        {% set node = nodes[link.id] %}
+        <tr>
+          <td>
+            {% if node %}
+              <div class="name-cell">
+                <span class="icon">{{ node|icon }}</span>
+                <a href="/files/{{ node.id }}/detail">{{ node.name }}</a>
+              </div>
+            {% else %}
+              <span class="muted">(eliminado)</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="mono">{{ base_url }}/s/{{ link.token }}</span>
+            <button class="small" data-copy="{{ base_url }}/s/{{ link.token }}">Copiar</button>
+            {% if link.password_hash %}<span class="tag">contraseña</span>{% endif %}
+            {% if link.mode.value != 'download' %}<span class="tag">{{ link.mode.value }}</span>{% endif %}
+          </td>
+          <td class="hide-sm muted">{{ link.expires_at|datetime if link.expires_at else 'sin caducidad' }}</td>
+          <td class="hide-sm">{{ link.download_count }}{% if link.download_limit %} / {{ link.download_limit }}{% endif %}</td>
+          <td class="right">
+            <form class="inline" method="post" action="/links/{{ link.id }}/revoke"
+                  data-confirm="¿Revocar este enlace?">
+              <button class="small danger" type="submit">Revocar</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

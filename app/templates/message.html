@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="card">
+    <h1>{{ title }}</h1>
+    <p>{{ message }}</p>
+    <p><a class="button" href="/">Volver al inicio</a></p>
+  </div>
+</div>
+{% endblock %}

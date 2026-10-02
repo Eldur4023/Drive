@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}{{ node.name }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">{{ node|icon }} {{ node.name }}</h2>
+    <span class="tag">enlace compartido</span>
+  </div>
+  {% if link.expires_at %}
+    <p class="muted">Este enlace caduca el {{ link.expires_at|datetime }}.</p>
+  {% endif %}
+  {% if link.download_limit %}
+    <p class="muted">Descargas: {{ link.download_count }} de {{ link.download_limit }}.</p>
+  {% endif %}
+
+  {% if breadcrumbs|length > 1 %}
+    <div class="breadcrumbs">
+      {% for crumb in breadcrumbs %}
+        <span class="sep">{% if not loop.first %}/{% endif %}</span>
+        <a href="/s/{{ link.token }}?node_id={{ crumb.id }}">{{ crumb.name }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if not node.is_dir %}
+    {% if can_download %}
+      <p><a class="button primary" href="/s/{{ link.token }}/download/{{ node.id }}">Descargar</a></p>
+    {% else %}
+      <p class="muted">Este enlace sólo admite subidas.</p>
+    {% endif %}
+  {% elif items %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th class="right"></th></tr></thead>
+        <tbody>
+          {% for item in items %}
+          <tr>
+            <td>
+              <div class="name-cell">
+                <span class="icon">{{ item|icon }}</span>
+                {% if item.is_dir %}
+                  <a href="/s/{{ link.token }}?node_id={{ item.id }}">{{ item.name }}</a>
+                {% else %}
+                  <span>{{ item.name }}</span>
+                {% endif %}
+              </div>
+            </td>
+            <td class="hide-sm">{{ '—' if item.is_dir else item.size|size }}</td>
+            <td class="right">
+              {% if can_download and not item.is_dir %}
+                <a class="button small" href="/s/{{ link.token }}/download/{{ item.id }}">Descargar</a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% elif link.allow_listing %}
+    <p class="muted">Esta carpeta está vacía.</p>
+  {% else %}
+    <p class="muted">El contenido de esta carpeta no es visible.</p>
+  {% endif %}
+</div>
+
+{% if can_upload %}
+<div class="card">
+  <h2>Dejar ficheros</h2>
+  <p class="muted">Puedes subir ficheros a esta carpeta sin necesidad de tener cuenta.</p>
+  <form method="post" action="/s/{{ link.token }}/upload" enctype="multipart/form-data">
+    <input type="hidden" name="node_id" value="{{ node.id }}">
+    <div class="dropzone" data-dropzone data-auto>
+      <input type="file" name="files" multiple aria-label="Elegir ficheros">
+      <span class="dz-icon"><svg class="ico"><use href="#i-upload"/></svg></span>
+      <span class="dz-title">Arrastra ficheros o carpetas aquí</span>
+      <p class="muted">o pulsa para elegirlos en tu equipo</p>
+      <p class="picked"></p>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button type="button" data-pick-dir><svg class="ico"><use href="#i-folder"/></svg>Subir carpeta</button>
+      <noscript><button class="primary" type="submit">Subir</button></noscript>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

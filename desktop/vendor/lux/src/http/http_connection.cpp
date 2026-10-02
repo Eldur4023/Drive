@@ -1,0 +1,834 @@
+#include "http_connection.hpp"
+#include "../../include/lux/request.hpp"
+#include "../../include/lux/response.hpp"
+#include "../../include/lux/task.hpp"
+#include "../../include/lux/metrics.hpp"
+#include "../../include/lux/logger.hpp"
+#include "../../include/lux/percent_encoding.hpp"
+
+#include <sys/epoll.h>
+#include <sys/sendfile.h>
+#include <sys/uio.h>
+#include <fstream>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <algorithm>
+
+namespace lux::http {
+
+// ── HttpConnection ────────────────────────────────────────────────────────────
+
+HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
+                               lux::DispatchFn dispatch,
+                               std::shared_ptr<std::atomic<int>> conn_count,
+                               std::shared_ptr<std::atomic<int>> loop_count)
+    : fd_(fd)
+    , loop_(loop)
+    , dispatch_(std::move(dispatch))
+    , conn_count_(std::move(conn_count))
+    , loop_count_(std::move(loop_count))
+    , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); },
+              [this]() { this->on_headers_complete(); })
+{}
+
+void HttpConnection::start() {
+    set_deadline(kIdleTimeoutMs, kIdleMsg);
+}
+
+void HttpConnection::arm_between_requests() {
+    if (parser_.in_message()) set_deadline(kHeaderTimeoutMs, kHeaderTimeoutMsg);
+    else                      set_deadline(kIdleTimeoutMs, kIdleMsg);
+}
+
+// Fired by the parser (cb_on_headers_complete, via the OnHeadersComplete
+// callback wired in the constructor) the instant headers finish parsing —
+// still synchronously inside the parser_.feed() call underneath do_read()
+// or finish_cycle(). Swaps the Slowloris timer for the request timer: from
+// here until the response is fully written (or a handler explicitly
+// cancels it for a stream — see cancel_request_timeout()), kRequestTimeoutMs
+// is this request's one budget for body + handler + write combined.
+void HttpConnection::on_headers_complete() {
+    set_deadline(kRequestTimeoutMs, kRequestTimeoutMsg);
+}
+
+void HttpConnection::set_deadline(int ms, const char* msg) {
+    deadline_     = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    deadline_msg_ = msg;
+    if (timer_ >= 0 && deadline_ < timer_at_) {   // earlier than the timer: rare, see the .hpp
+        loop_.cancel_timer(timer_);
+        timer_ = -1;
+    }
+    if (timer_ < 0) schedule_deadline(ms);
+}
+
+void HttpConnection::schedule_deadline(int ms) {
+    std::weak_ptr<HttpConnection> weak = shared_from_this();
+    timer_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+    timer_ = loop_.schedule_timer(ms, [weak]() {
+        if (auto self = weak.lock()) self->on_deadline();
+    });
+}
+
+void HttpConnection::on_deadline() {
+    timer_ = -1;   // already fired: nothing left to cancel
+    if (closed_ || !deadline_msg_) return;
+    const auto left = deadline_ - std::chrono::steady_clock::now();
+    if (left > std::chrono::steady_clock::duration::zero()) {
+        const auto ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
+        schedule_deadline(static_cast<int>(ms));
+        return;
+    }
+    if (deadline_msg_ != kIdleMsg) send_error(408, deadline_msg_);
+    close();
+}
+
+// Called after any read()/write()/sendfile() that moved at least one byte
+// on this connection, so kRequestTimeoutMs measures inactivity, not total
+// duration (see the comment on kRequestTimeoutMs). A no-op when there is no
+// active bound-response window to push back — no request deadline either
+// before the first request's headers complete, or permanently after
+// cancel_request_timeout() takes this connection out of that model
+// entirely (SSE/WS) — so this never re-arms a timeout a stream opted out of.
+void HttpConnection::refresh_request_timeout() {
+    if (deadline_msg_ == kRequestTimeoutMsg) set_deadline(kRequestTimeoutMs, kRequestTimeoutMsg);
+}
+
+// Lets a handler that turns this response into an open-ended stream (SSE,
+// WebSocket) opt out of the bounded request timeout once ITS headers are on
+// the wire — see the comment on Request::_cancel_request_timeout.
+void HttpConnection::cancel_request_timeout() {
+    deadline_msg_ = nullptr;
+}
+
+HttpConnection::~HttpConnection() {
+    if (!closed_) {
+        // Safe closure: we skip loop_.remove() to avoid re-entrant erase if
+        // this destructor is called during EventLoop callbacks_ teardown.
+#ifdef LUX_IO_URING
+        // IoUringLoop timers are timerfds. EpollLoop's are map ids, not fds:
+        // a pending one only holds a weak_ptr and fires as a no-op.
+        if (timer_ >= 0) ::close(timer_);
+#endif
+        if (file_fd_     >= 0) ::close(file_fd_);
+        ::close(fd_);
+    }
+}
+
+// ── Event dispatch ────────────────────────────────────────────────────────────
+
+void HttpConnection::on_event(uint32_t events) {
+    if (events & (EPOLLERR | EPOLLHUP)) { close(); return; }
+
+    // While write_buf_ has data, only EPOLLOUT is armed.
+    // Once the buffer is drained, EPOLLIN is re-armed (see on_write_complete).
+    //
+    // WS mode is full-duplex — EPOLLIN stays armed alongside EPOLLOUT while a
+    // frame is backed up (see queue_ws_write()) — so telling the two writers
+    // apart has to happen here rather than by "which events fired": _ws_on_data
+    // is the same signal do_read() already uses to route incoming bytes to the
+    // WS parser instead of the HTTP one, set for the whole WS session and
+    // cleared only in close().
+    if (events & EPOLLOUT) {
+        if (auto req = current_req_.lock(); req && req->_ws_on_data) do_ws_write();
+        else                                                         do_write();
+    }
+    if (events & EPOLLIN)  do_read();
+}
+
+// ── Read path ─────────────────────────────────────────────────────────────────
+
+void HttpConnection::do_read() {
+    char buf[16384];
+    while (!closed_) {
+        ssize_t n = ::read(fd_, buf, sizeof(buf));
+        if (n == 0) { close(); return; }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            if (errno == EINTR) continue;
+            close(); return;
+        }
+
+        // Bytes arrived: this connection is making progress, not stalled.
+        // A no-op for a WS/SSE stream (no request deadline there —
+        // see cancel_request_timeout()) and for a connection between
+        // requests (only the header deadline until on_headers_complete()).
+        refresh_request_timeout();
+
+        // WebSocket mode: forward decrypted bytes to the WS frame parser.
+        if (auto req = current_req_.lock(); req && req->_ws_on_data) {
+            req->_ws_on_data(buf, static_cast<size_t>(n));
+            continue;
+        }
+
+        // Pipelining: while a previous request is in flight the parser is
+        // paused.  Buffer the bytes; on_write_complete replays them once the
+        // current response has been written.
+        if (in_flight_ || parser_.is_paused()) {
+            if (pending_buf_.size() + static_cast<size_t>(n) > kMaxPendingBuf) {
+                send_error(400, "Pipelined request too large");
+                close();
+                return;
+            }
+            pending_buf_.append(buf, static_cast<size_t>(n));
+            continue;
+        }
+
+        if (!feed_parser(buf, static_cast<size_t>(n))) return;
+        // A request begun but not finished: from idle to the header timeout.
+        if (deadline_msg_ == kIdleMsg && parser_.in_message())
+            set_deadline(kHeaderTimeoutMs, kHeaderTimeoutMsg);
+
+        // The handler was synchronous and already replied inside feed(): now
+        // that the pause is in place, the cycle can really be closed.
+        if (cycle_pending_) {
+            cycle_pending_ = false;
+            finish_cycle();
+            if (closed_) return;
+        }
+
+        // A short read drained the socket: asking again only to hear EAGAIN
+        // was one syscall in four. Anything that arrives later is a new edge
+        // (EPOLLET, tcp_server.cpp) and wakes the loop again. Edge, not level:
+        // level re-queued every socket just served ahead of ones still
+        // waiting, and half the requests waited a round -- p90 twice p50.
+        if (static_cast<size_t>(n) < sizeof(buf)) return;
+    }
+}
+
+bool HttpConnection::feed_parser(const char* data, size_t n) {
+    in_parser_ = true;
+    bool ok    = parser_.feed(data, n);
+    in_parser_ = false;
+    if (!ok) {
+        send_error(parser_.body_too_large() ? 413 : 400,
+                   parser_.body_too_large() ? "Content Too Large" : "Bad Request");
+        close();
+        return false;
+    }
+    // Parser pauses after each completed message — save any trailing bytes
+    // that belong to the next pipelined request.
+    size_t un = parser_.is_paused() ? parser_.unconsumed() : 0;
+    if (un == 0) return true;
+    const char* tail = data + n - un;
+    // The handler that just ran synchronously inside feed() may have
+    // upgraded this connection to WebSocket — the handshake and the client's
+    // first frame can land in the same read(). Those bytes are WS frames, not
+    // the next pipelined HTTP request, and since in_flight_ never resets for a
+    // long-lived WS handler, nothing would ever drain pending_buf_ again.
+    if (auto req = current_req_.lock(); req && req->_ws_on_data) {
+        req->_ws_on_data(tail, un);
+    } else if (pending_buf_.size() + un > kMaxPendingBuf) {
+        send_error(400, "Pipelined request too large");
+        close();
+        return false;
+    } else {
+        pending_buf_.append(tail, un);
+    }
+    return true;
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
+
+void HttpConnection::dispatch(ParsedRequest req_parsed) {
+    // Mark the connection as busy until on_write_complete fires.  do_read()
+    // will buffer further bytes rather than starting a second dispatch that
+    // would race for write_buf_ / the deadline.
+    in_flight_ = true;
+
+    // Fresh cancellation token for this request.
+    cancel_token_ = std::make_shared<lux::CancellationToken>();
+
+    // Set thread-locals so handlers can call sleep(ms) without explicit args.
+    lux::detail::current_loop  = &loop_;
+    lux::detail::current_token = cancel_token_;
+
+    auto req_ptr = std::make_shared<lux::Request>();
+    auto res_ptr = std::make_shared<lux::Response>();
+
+    req_ptr->method       = std::move(req_parsed.method);
+    req_ptr->path         = std::move(req_parsed.path);
+    req_ptr->version      = std::move(req_parsed.version);
+    req_ptr->headers      = std::move(req_parsed.headers);
+    req_ptr->body         = std::move(req_parsed.body);
+    req_ptr->body_map     = std::move(req_parsed.body_map);
+    req_ptr->loop         = &loop_;
+    req_ptr->cancel_token = cancel_token_;
+
+    req_ptr->_conn        = shared_from_this();
+    req_ptr->_bind_stream = &HttpConnection::bind_stream;
+
+    parse_form_encoded(req_parsed.query, req_ptr->query);
+    req_ptr->raw_query = std::move(req_parsed.query);
+
+    // Keep a weak ref for WebSocket mode — do_read() routes through it.
+    current_req_ = req_ptr;
+
+    // Resolve remote IP from the socket, once per connection
+    sockaddr_storage ss{};
+    socklen_t sslen = sizeof(ss);
+    if (!peer_ip_done_ &&
+        ::getpeername(fd_, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
+        peer_ip_done_ = true;
+        char ipbuf[INET6_ADDRSTRLEN]{};
+        if (ss.ss_family == AF_INET) {
+            inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&ss)->sin_addr,
+                      ipbuf, sizeof(ipbuf));
+        } else if (ss.ss_family == AF_INET6) {
+            inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&ss)->sin6_addr,
+                      ipbuf, sizeof(ipbuf));
+        }
+        peer_ip_ = ipbuf;
+    }
+    req_ptr->remote_ip = peer_ip_;
+
+    // The request deadline is already armed by the time dispatch() runs:
+    // on_headers_complete() (fired earlier, straight from the parser, the
+    // instant headers finished) swapped the Slowloris deadline for this
+    // request's body + handler + write. A handler that turns this response
+    // into an SSE stream or a WebSocket cancels it itself, through
+    // _cancel_request_timeout (bind_stream()), once its own headers are on
+    // the wire.
+
+    auto wrapper_task = [](std::shared_ptr<lux::Request> req_ptr,
+                           std::shared_ptr<lux::Response> res_ptr,
+                           lux::DispatchFn disp) -> lux::Task<void> {
+        try {
+            co_await disp(*req_ptr, *res_ptr);
+        } catch (const std::exception& e) {
+            // Log internally but do not expose e.what() to clients — it may
+            // contain connection strings, file paths, or other internal detail.
+            lux::log().error("unhandled exception: ", e.what());
+            res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
+        } catch (...) {
+            res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
+        }
+    }(req_ptr, res_ptr, dispatch_);
+
+    auto h = wrapper_task.detach();
+    h.promise().loop = &loop_;
+
+    auto self = shared_from_this();
+    h.promise().on_complete = [self, req_ptr, res_ptr]() {
+        self->finish_dispatch(*req_ptr, *res_ptr);
+    };
+
+    h.resume();
+}
+
+// The hooks an SSE or WebSocket response writes through (Request::bind_stream).
+//
+// _raw_write: a single write on the socket. close() does NOT reset fd_ to -1
+// (only timer_/file_fd_ get that treatment; fd_ itself is closed and left
+// as-is) -- what makes a write after close() safe is the explicit
+// self->closed_ check, not the fd value. Without that check, writing to fd_
+// after ::close(fd_) has run would target whatever the kernel already reused
+// that same descriptor number for on a busy server, not fail cleanly with EBADF.
+void HttpConnection::bind_stream(lux::Request& req) {
+    auto self = std::static_pointer_cast<HttpConnection>(req._conn);
+    req._raw_write = [self](const char* data, size_t len) -> ssize_t {
+        if (self->closed_) { errno = EBADF; return -1; }
+        return ::write(self->fd_, data, len);
+    };
+    req._ws_queue_write = [self](std::string frame) {
+        self->queue_ws_write(std::move(frame));
+    };
+    req._cancel_request_timeout = [self]() {
+        self->cancel_request_timeout();
+    };
+    req._force_close = [self]() {
+        self->close();
+    };
+}
+
+// Parses a single-range "Range: bytes=..." value into [start, end] (both
+// inclusive), against `total` (the file's actual size). Supports the three
+// forms RFC 7233 §2.1 defines for one range: "start-end", "start-" (to
+// EOF) and "-suffix_length" (the last N bytes).
+//
+// Returns false — leave `start`/`end` untouched, serve the file whole — on
+// anything this does not handle: no Range header, multiple ranges
+// (comma-separated; no real video player sends these for a seek, so
+// multipart/byteranges responses are not implemented), a unit other than
+// "bytes", or text that does not parse. RFC 7233 §3.1 is explicit that an
+// unparseable Range is not a server error: the server "SHOULD ignore the
+// Range header field" and return the full representation, exactly as if
+// the header had never arrived.
+static bool parse_single_byte_range(const std::string& header, std::uintmax_t total,
+                                    std::uintmax_t& start, std::uintmax_t& end) {
+    if (header.rfind("bytes=", 0) != 0) return false;
+    std::string spec = header.substr(6);
+    if (spec.find(',') != std::string::npos) return false;
+    auto dash = spec.find('-');
+    if (dash == std::string::npos) return false;
+    std::string a = spec.substr(0, dash), b = spec.substr(dash + 1);
+    try {
+        if (a.empty()) {
+            if (b.empty()) return false;
+            std::uintmax_t suffix = std::stoull(b);
+            start = suffix >= total ? 0 : total - suffix;
+            end   = total > 0 ? total - 1 : 0;
+        } else {
+            start = std::stoull(a);
+            end   = b.empty() ? (total > 0 ? total - 1 : 0) : std::stoull(b);
+        }
+    } catch (...) { return false; }
+
+    // RFC 7233 §2.1: a range where last-byte-pos < first-byte-pos is
+    // syntactically invalid. Treating it the same as "unparseable" — ignore
+    // it and serve the whole file (§3.1) — matches this function's existing
+    // contract for every other malformed spec. Without this check, the
+    // caller went on to compute `range_end - range_start + 1`
+    // (response.hpp's partial_content()) with end < start, which underflows
+    // to something on the order of 2^64 and gets sent to the client as the
+    // response's own Content-Length: a `Range: bytes=5-3` produced
+    // `Content-Length: 18446744073709551615` instead of either serving the
+    // file whole or answering 416.
+    if (start > end) return false;
+    return true;
+}
+
+void HttpConnection::finish_dispatch(lux::Request& request,
+                                     lux::Response& response) {
+    // The connection may already be gone: close() runs for any reason (peer
+    // disconnect, an EPOLLERR/HUP, the request timeout) and cancels this
+    // request's CancellationToken, but that only asks the handler's
+    // coroutine to stop -- it does not force it to. A handler that does not
+    // check is_cancelled() before its next await or return keeps running
+    // after cancellation and completes normally, landing here regardless.
+    // Every path below either writes to a socket send_response() already
+    // knows to skip once closed_ is set, or -- the sendfile branch -- opens
+    // a REAL file descriptor first. Opening it for a response that will
+    // never be sent leaked that fd forever: send_response()'s own
+    // closed_ check discards the headers before do_sendfile() ever runs,
+    // and the destructor only closes file_fd_ when `!closed_`, which by
+    // then it never is.
+    if (closed_) return;
+
+    // Record the request in the global metrics counter.
+    lux::Metrics::instance().record(response.status_code());
+
+    // Determine keep-alive before building the response
+    keep_alive_ = (request.version == "HTTP/1.1");
+    if (auto conn = request.header("connection")) {
+        std::string val = *conn;
+        std::transform(val.begin(), val.end(), val.begin(), ::tolower);
+        keep_alive_ = (val != "close");
+    }
+    response.header("Connection", keep_alive_ ? "keep-alive" : "close");
+
+    // SSE / WebSocket mode: headers were already written directly.
+    // Just close the connection — do not send a second response.
+    if (response.sse_started() || response.ws_started()) {
+        keep_alive_ = false;
+        close();
+        return;
+    }
+
+    // sendfile path — send headers with correct Content-Length, but no body for HEAD
+    if (!response.sendfile_path().empty() && request.method == "HEAD") {
+        send_response(response.build());
+        return;
+    }
+    if (!response.sendfile_path().empty()) {
+        // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
+        int fd = response.take_sendfile_fd();
+        if (fd < 0) fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            lux::Response err;
+            err.status(500).json_text(R"({"error":"Cannot open file"})");
+            send_and_close(err);
+            return;
+        }
+        file_fd_        = fd;
+        file_offset_    = 0;
+        file_remaining_ = static_cast<size_t>(response.sendfile_size());
+
+        // If-Range (RFC 7233 §3.2): a Range request is only honored if the
+        // resource is STILL the exact representation the client already
+        // has part of — the header carries the ETag the client saw on its
+        // first (whole-file) response. A player that paused mid-download,
+        // resumed, and finds the file has since been REPLACED (same static
+        // path, different bytes: a redeploy, a re-encode, another upload
+        // overwriting the name) must get the file fresh from byte 0, not a
+        // 206 splicing a range of the OLD content onto bytes it already
+        // has of a DIFFERENT one, silently producing a corrupted file with
+        // no error anywhere. Only a STRONG validator may be used for this
+        // (a weak `W/"..."` one does not promise byte-for-byte identity,
+        // so it can never satisfy an exact match here) -- this framework's
+        // own ETag (make_etag(), app.cpp) is always strong, so a plain
+        // string comparison against it is exactly what the RFC asks for.
+        // No ETag on the response at all (a bare send_file() outside the
+        // static-mount path, which does not set one) means there is
+        // nothing to validate against, so the same "ignore the Range
+        // header, serve the whole file" fallback already used for a
+        // syntactically invalid Range applies here too.
+        bool if_range_blocks_partial = false;
+        if (auto if_range = request.header("if-range")) {
+            const std::string* etag = response.header_value("ETag");
+            if (!etag || *etag != *if_range)
+                if_range_blocks_partial = true;
+        }
+
+        // Range support (RFC 7233) — a video player seeking sends this;
+        // this is the one place in the framework that ever sees the
+        // request's Range header, so it is also the only place that can
+        // validate one against this specific file's size.
+        if (auto range = request.header("range")) {
+            std::uintmax_t total = response.sendfile_size();
+            std::uintmax_t start = 0, end = 0;
+            if (!if_range_blocks_partial && parse_single_byte_range(*range, total, start, end)) {
+                // A start past the end of the file (or a zero-length file)
+                // cannot be satisfied at all — 416, per RFC 7233 §4.4.
+                // An end past the end of the file is NOT invalid, though
+                // (§2.1): it is clamped to the last actual byte instead of
+                // rejected, the same way a slice with an out-of-range
+                // upper bound is clamped elsewhere in this codebase, not
+                // an error.
+                if (total == 0 || start >= total) {
+                    ::close(fd);
+                    file_fd_ = -1;
+                    lux::Response err;
+                    err.status(416).header("Content-Range", "bytes */" + std::to_string(total));
+                    send_and_close(err);
+                    return;
+                }
+                if (end >= total) end = total - 1;
+                file_offset_    = static_cast<off_t>(start);
+                file_remaining_ = static_cast<size_t>(end - start + 1);
+                response.partial_content(start, end);
+            }
+            // parse_single_byte_range() returned false: leave file_offset_/
+            // file_remaining_ as set above (the whole file) and fall
+            // through to serving it in full, per RFC 7233 §3.1.
+        }
+    }
+
+    // A big body goes out with the head (writev) from where it is, not
+    // copied behind it first; a small one is cheaper to copy than to split.
+    std::string built = response.build_head();
+    if (request.method != "HEAD" && response.sendfile_path().empty()) {
+        if (response.body().size() < 16384) {
+            built += response.body();
+            send_response(std::move(built));
+            return;
+        }
+        send_response(std::move(built), &response.body());
+        return;
+    }
+    if (request.method == "HEAD") {
+        // RFC 9110 §9.3.2: a HEAD response carries the exact headers (in
+        // particular the same Content-Length) a GET to the same resource
+        // would have produced, but no body. Router::match() answers a HEAD
+        // request with the matching route's GET handler when there is no
+        // HEAD handler of its own (see match_recursive()), so a plain
+        // text()/json()/html() handler runs exactly as it would for GET and
+        // commits a real body here -- build() has no idea what method this
+        // was for, so the body is stripped as a last step instead. The
+        // sendfile path never reaches this line for HEAD (handled above,
+        // where it can skip opening/streaming the file altogether).
+        auto pos = built.find("\r\n\r\n");
+        if (pos != std::string::npos) built.resize(pos + 4);
+    }
+    send_response(std::move(built));
+}
+
+// ── Write path ────────────────────────────────────────────────────────────────
+//
+// Strategy:
+//   1. Try an immediate write(2).  If all bytes go through → done.
+//   2. If EAGAIN or partial write → buffer the remainder, arm EPOLLOUT.
+//      EPOLLIN is removed while writing so we don't try to parse a new
+//      request before the current response is fully sent.
+//   3. EPOLLOUT fires → do_write() drains the buffer.
+//   4. Buffer empty → on_write_complete(): cancel timeout, handle keep-alive.
+
+void HttpConnection::send_response(std::string data, const std::string* body) {
+    if (closed_) return;
+    // No size cap here: the response is already whole in memory, so one
+    // saves nothing -- it only dropped every response over 16 MB, however
+    // fast the client read. A slow reader is the write timeout's job.
+    const size_t total = data.size() + (body ? body->size() : 0);
+    if (body && !body->empty()) {
+        iovec iov[2] = {{data.data(), data.size()}, {const_cast<char*>(body->data()), body->size()}};
+        const ssize_t n = ::writev(fd_, iov, 2);
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) { close(); return; }
+        const size_t written = n < 0 ? 0 : static_cast<size_t>(n);
+        if (written == total) { on_write_complete(); return; }
+        // The socket took part of it: what is left goes out from one buffer.
+        data += *body;
+        write_buf_    = std::move(data);
+        write_offset_ = written;
+        arm(EPOLLOUT);
+        return;
+    }
+
+    // Try an immediate write; on EAGAIN/partial, keep the full string with
+    // an offset and arm EPOLLOUT only (EPOLLIN dropped until it completes).
+    // Headers with a file behind them wait for it (MSG_MORE): one segment
+    // for both instead of a small one of their own.
+    ssize_t n = file_fd_ >= 0 ? ::send(fd_, data.data(), data.size(), MSG_MORE)
+                              : ::write(fd_, data.data(), data.size());
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        close(); return;
+    }
+    size_t written = n < 0 ? 0 : static_cast<size_t>(n);
+    if (written == data.size()) {
+        // Headers sent in one shot — still need to stream the file body if pending.
+        if (file_fd_ >= 0) { do_sendfile(); return; }
+        on_write_complete();
+        return;
+    }
+    write_buf_    = std::move(data);
+    write_offset_ = written;
+    arm(EPOLLOUT);
+}
+
+void HttpConnection::do_write() {
+    while (write_offset_ < write_buf_.size()) {
+        ssize_t n = ::write(fd_, write_buf_.data() + write_offset_,
+                            write_buf_.size() - write_offset_);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                arm(EPOLLOUT);
+                return;
+            }
+            if (errno == EINTR) continue;
+            close(); return;
+        }
+        write_offset_ += static_cast<size_t>(n);
+        // Forward progress on a slow client's socket buffer — see the
+        // comment on kRequestTimeoutMs for why this is a refresh, not a
+        // fixed deadline: a legitimately slow receiver that keeps draining
+        // the buffer should not be cut off partway through a large response.
+        refresh_request_timeout();
+    }
+
+    // All header/body bytes sent — reset buffer
+    write_buf_.clear();
+    write_offset_ = 0;
+
+    // If a file is pending, stream it via sendfile(2)
+    if (file_fd_ >= 0) { do_sendfile(); return; }
+
+    on_write_complete();
+}
+
+// ── WebSocket write path ─────────────────────────────────────────────────────
+//
+// Mirrors do_write()/send_response() but stays independent of them on
+// purpose: a WS session has no request/response cycle to close (no
+// keep-alive decision, no timeout to cancel), it just has frames that need
+// to reach the wire in order and whole.
+
+void HttpConnection::do_ws_write() {
+    while (ws_write_offset_ < ws_write_buf_.size()) {
+        ssize_t n = ::write(fd_,
+                            ws_write_buf_.data() + ws_write_offset_,
+                            ws_write_buf_.size() - ws_write_offset_);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;  // EPOLLOUT stays armed
+            if (errno == EINTR) continue;
+            close(); return;
+        }
+        if (n == 0) { close(); return; }
+        ws_write_offset_ += static_cast<size_t>(n);
+    }
+
+    ws_write_buf_.clear();
+    ws_write_offset_ = 0;
+
+    // Fully drained: back to read-only interest. Reading (incoming WS
+    // frames, including a Close from the peer) never stopped while this was
+    // draining — EPOLLIN stayed armed the whole time, see queue_ws_write().
+    arm(EPOLLIN);
+}
+
+// Queues one already-built frame for the socket. Tries an immediate write
+// first — the common case, most frames are small and the send buffer is
+// usually free — and only falls back to buffering on backpressure.
+//
+// Ordering matters here as much as it does in send_response(): if anything
+// is already queued, this frame goes on the end of it rather than racing a
+// second ::write() against do_ws_write()'s drain of the first.
+void HttpConnection::queue_ws_write(std::string frame) {
+    if (closed_) return;
+
+    if (!ws_write_buf_.empty()) {
+        if (ws_write_buf_.size() - ws_write_offset_ + frame.size() > kMaxResponseBytes) {
+            // The peer is not draining even with EPOLLOUT backing this up —
+            // continuing to buffer would just be unbounded growth driven by
+            // however many times the handler calls ws.send().
+            close();
+            return;
+        }
+        ws_write_buf_ += frame;
+        return;
+    }
+
+    ssize_t n = ::write(fd_, frame.data(), frame.size());
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            ws_write_buf_    = std::move(frame);
+            ws_write_offset_ = 0;
+            arm(EPOLLIN | EPOLLOUT);
+            return;
+        }
+        close();
+        return;
+    }
+    if (n == 0) { close(); return; }
+
+    size_t written = static_cast<size_t>(n);
+    if (written == frame.size()) return;  // whole frame out, nothing to queue
+
+    ws_write_buf_    = std::move(frame);
+    ws_write_offset_ = written;
+    arm(EPOLLIN | EPOLLOUT);
+}
+
+void HttpConnection::do_sendfile() {
+    // Zero-copy kernel transfer, plaintext only.
+    while (file_remaining_ > 0) {
+        ssize_t n = ::sendfile(fd_, file_fd_, &file_offset_,
+                               std::min(file_remaining_, size_t{256 * 1024}));
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                arm(EPOLLOUT); // socket buffer full — resume when drains
+                return;
+            }
+            if (errno == EINTR) continue;
+            close(); return;
+        }
+        if (n == 0) break; // EOF
+        file_remaining_ -= static_cast<size_t>(n);
+        // A slow-but-progressing download (rate-limited client, video
+        // seek/playback) must not be cut off just because the whole
+        // transfer takes longer than kRequestTimeoutMs -- see its comment.
+        refresh_request_timeout();
+    }
+
+    ::close(file_fd_);
+    file_fd_        = -1;
+    file_offset_    = 0;
+    file_remaining_ = 0;
+    on_write_complete();
+}
+
+void HttpConnection::on_write_complete() {
+    // Cancel the request timeout — response delivered successfully
+    deadline_msg_ = nullptr;
+    in_flight_ = false;
+
+    if (!keep_alive_) {
+        close();
+        return;
+    }
+
+    // Inside feed() the pause does not exist yet: defer the cycle close.
+    if (in_parser_) { cycle_pending_ = true; return; }
+    finish_cycle();
+}
+
+void HttpConnection::finish_cycle() {
+    // Pipelining: drain any buffered bytes that belong to the next request(s).
+    //
+    // Looped rather than one-shot, and the nested feed() below is bracketed
+    // with in_parser_ exactly like do_read() brackets its own feed() call.
+    // Without that bracket, a pipelined request whose handler is synchronous
+    // finishes its whole cycle *inside* this feed() call (on_message_complete
+    // -> dispatch() -> ... -> on_write_complete()), and on_write_complete()
+    // saw in_parser_ == false here and called finish_cycle() again right
+    // then and there — reentrantly, from underneath a parser_.feed() that
+    // was still on the stack (llhttp_execute() had not even returned
+    // HPE_PAUSED to its caller yet). That reentrant call resumed a parser
+    // that had not actually paused and stomped on pending_buf_ out from
+    // under the feed() call above it, which is why only the first couple of
+    // requests in a pipelined batch ever got answered and the connection
+    // wedged until the Slowloris timer killed it.
+    //
+    // With the bracket, on_write_complete() instead sets cycle_pending_ and
+    // returns (same as the top-level do_read() case), and this loop picks
+    // that up on its next iteration once the feed() call has fully unwound.
+    for (;;) {
+        if (parser_.is_paused()) parser_.resume();
+        if (pending_buf_.empty()) break;
+
+        std::string buf;
+        buf.swap(pending_buf_);
+
+        if (!feed_parser(buf.data(), buf.size())) return;
+
+        // The handler was synchronous and already replied inside the feed()
+        // above: loop back around to resume the parser and drain whatever is
+        // left in pending_buf_ (set by cycle_pending_, deferred exactly like
+        // do_read() defers it for the first request in a batch).
+        if (cycle_pending_) {
+            cycle_pending_ = false;
+            continue;
+        }
+
+        // The handler suspended (awaited something): dispatch() flipped
+        // in_flight_ back on and finish_dispatch() -> ... ->
+        // on_write_complete() will call finish_cycle() itself once it
+        // resumes. Nothing left to do on this stack frame.
+        if (in_flight_) return;
+    }
+
+    // Re-arm for the next keep-alive request: idle, or the header timeout
+    // when part of it is already here. Without this, a client that sends
+    // headers slowly on the second request (Slowloris) would go unchecked.
+    arm_between_requests();
+
+    // Ready for the next request
+    arm(EPOLLIN);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+void HttpConnection::send_error(int code, const char* msg) {
+    lux::Response r;
+    // The message comes from a fixed engine list, with no quotes or backslashes.
+    r.status(code).json_text(std::string(R"({"error":")") + msg + R"("})");
+    send_and_close(r);
+}
+
+void HttpConnection::send_and_close(lux::Response& r) {
+    r.header("Connection", "close");
+    keep_alive_ = false;
+    send_response(r.build());
+}
+
+void HttpConnection::close() {
+    if (closed_) return;
+    closed_ = true;
+
+    // Signal any suspended coroutines (sleep, ws.recv()) to wake up and exit.
+    if (cancel_token_) cancel_token_->cancel();
+
+    // Drop the data callback so no further bytes get dispatched.  The
+    // shared_ptr<WSState> captured inside the closure stays alive via the
+    // running handler coroutine until that coroutine observes the cancellation
+    // and unwinds.
+    if (auto req = current_req_.lock(); req && req->_ws_on_data) {
+        req->_ws_on_data = nullptr;
+    }
+    current_req_.reset();
+
+    deadline_msg_ = nullptr;
+    if (timer_ >= 0) { loop_.cancel_timer(timer_); timer_ = -1; }
+    loop_.remove(fd_);
+    ::close(fd_);
+    if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
+    if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
+    if (loop_count_) loop_count_->fetch_sub(1, std::memory_order_relaxed);
+}
+
+} // namespace lux::http

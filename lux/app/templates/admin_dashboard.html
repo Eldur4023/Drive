@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Administración · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+{% include "admin_nav.html" %}
+
+{% for warning in c["warnings"] %}
+  <div class="notice warn">{{ warning }}</div>
+{% endfor %}
+
+<div class="grid cols-3">
+  <div class="stat"><b>{{ c["stats"]["users"] }}</b><span>usuarios{% if c["stats"]["pending"] > 0 %} · {{ c["stats"]["pending"] }} pendientes{% endif %}</span></div>
+  <div class="stat"><b>{{ c["stats"]["files"] }}</b><span>ficheros</span></div>
+  <div class="stat"><b>{{ c["stats"]["public"] }}</b><span>elementos públicos</span></div>
+  <div class="stat"><b>{{ c["stats"]["sessions"] }}</b><span>sesiones activas</span></div>
+  <div class="stat"><b>{{ c["stats"]["logical_h"] }}</b><span>tamaño lógico</span></div>
+  <div class="stat"><b>{{ c["stats"]["physical_h"] }}</b><span>en disco ({{ c["stats"]["blobs"] }} blobs)</span></div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h2>Disco del servidor</h2>
+  <p class="spread">
+    <span>{{ c["stats"]["disk_used_h"] }} de {{ c["stats"]["disk_total_h"] }}</span>
+    <span class="muted">{{ c["stats"]["disk_percent"] }}%</span>
+  </p>
+  <div class="meter {% if c["stats"]["disk_percent"] > 90 %}full{% endif %}"><span style="width: {{ c["stats"]["disk_percent"] }}%"></span></div>
+  {% if c["stats"]["dedup_saved"] > 0 %}
+    <p class="muted" style="margin-top:10px">
+      La deduplicación ahorra {{ c["stats"]["dedup_saved_h"] }} respecto al tamaño lógico.
+    </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Actividad reciente</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Cuándo</th><th>Evento</th><th>Quién</th><th class="hide-sm">Detalle</th></tr></thead>
+      <tbody>
+        {% for row in c["recent"] %}
+        <tr>
+          <td class="muted">{{ row["at_rel"] }}</td>
+          <td>{{ row["event"] }}</td>
+          <td>{{ row["who"] }} <span class="muted mono">{{ row["ip_h"] }}</span></td>
+          <td class="hide-sm muted">{{ row["detail"] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:12px"><a href="/admin/audit">Ver toda la auditoría</a></p>
+</div>
+{% endblock %}

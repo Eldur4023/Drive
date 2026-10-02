@@ -1,0 +1,324 @@
+# =============================================================================
+# Drive — configuración principal
+# -----------------------------------------------------------------------------
+# Todos los valores tienen un default razonable en app/config.py; aquí sólo hace
+# falta declarar lo que quieras cambiar. Cualquier clave puede sobreescribirse
+# por entorno usando el prefijo DRIVE_ y "__" como separador de nivel:
+#
+#   DRIVE_SECURITY__SECRET_KEY=...
+#   DRIVE_NETWORK__TRUSTED_NETWORKS='["10.0.0.0/8"]'
+#   DRIVE_STORAGE__MAX_UPLOAD_SIZE=5GB
+#
+# Los tamaños aceptan sufijos (B, KB, MB, GB, TB) y las duraciones aceptan
+# sufijos (s, m, h, d) además de números crudos (segundos / bytes).
+# =============================================================================
+
+app:
+  name: "Drive"
+  # URL pública completa. Se usa para construir los enlaces de compartición.
+  base_url: "http://localhost:8000"
+  # Idioma de la interfaz: es | en
+  language: "es"
+  # Zona horaria usada al mostrar fechas.
+  timezone: "Europe/Madrid"
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  # Número de workers de uvicorn (sólo aplica con el runner de deploy/).
+  workers: 2
+  # Si sirves detrás de nginx/traefik, déjalo en true para respetar
+  # X-Forwarded-For y X-Forwarded-Proto. Con false se ignoran esas cabeceras.
+  behind_proxy: true
+  # Redes desde las que se confía en las cabeceras X-Forwarded-*. Ponlo en la IP
+  # de tu proxy. Si behind_proxy es true y esto está vacío, se confía en el
+  # peer directo, lo que es inseguro si el proxy no es el único acceso.
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "::1/128"
+
+database:
+  # sqlite:///./data/drive.db  ó  postgresql+psycopg://user:pass@host/db
+  url: "sqlite:///./data/drive.db"
+  echo: false
+  pool_size: 5
+  max_overflow: 10
+
+storage:
+  # Directorio raíz de los blobs. Debe pertenecer al usuario del servicio.
+  root: "./data/blobs"
+  # Tamaño máximo por fichero subido.
+  max_upload_size: "2GB"
+  # Cuota por defecto de cada usuario nuevo. "0" o null = sin límite.
+  default_quota: "10GB"
+  # Deduplicación por hash: si dos usuarios suben el mismo fichero se guarda
+  # un único blob. Ahorra disco a costa de que borrar sea un refcount.
+  deduplicate: true
+  # Algoritmo de hash usado para deduplicar y para el ETag.
+  hash_algorithm: "sha256"
+  # Extensiones prohibidas para todos los usuarios (case-insensitive).
+  # Vacío = permitir todo. Los administradores no están exentos.
+  blocked_extensions:
+    - ".exe"
+    - ".scr"
+  # Si no está vacío, SÓLO se permiten estas extensiones (lista blanca).
+  allowed_extensions: []
+  # Tipos MIME bloqueados, detectados por extensión declarada.
+  blocked_mime_types: []
+
+trash:
+  enabled: true
+  # Los ficheros borrados se purgan definitivamente pasado este tiempo.
+  retention: "30d"
+  # Si es true, el espacio en papelera sigue contando para la cuota.
+  counts_against_quota: true
+
+versions:
+  enabled: true
+  # Número máximo de versiones antiguas conservadas por fichero.
+  max_per_file: 10
+  # Versiones más antiguas que esto se eliminan aunque quepan en max_per_file.
+  retention: "90d"
+
+thumbnails:
+  enabled: true
+  # Tamaños generados (lado mayor, en píxeles).
+  sizes: [128, 512]
+  # No generar miniaturas para imágenes mayores de este tamaño.
+  max_source_size: "25MB"
+
+# -----------------------------------------------------------------------------
+# Autenticación y cuentas
+# -----------------------------------------------------------------------------
+auth:
+  # Permitir que cualquiera cree una cuenta desde /register.
+  registration_enabled: false
+  # Si registration_enabled, sólo estos dominios de email pueden registrarse.
+  # Vacío = cualquier dominio.
+  allowed_email_domains: []
+  # Las cuentas nuevas quedan inactivas hasta que un admin las aprueba.
+  require_admin_approval: true
+  # Rol asignado a las cuentas nuevas: admin | user | guest
+  default_role: "user"
+  # Permitir login con el email además de con el nombre de usuario.
+  allow_email_login: true
+
+security:
+  # OBLIGATORIO cambiar en producción. Firma cookies de sesión y enlaces.
+  # Genérala con:  python -c "import secrets; print(secrets.token_urlsafe(64))"
+  secret_key: "CAMBIAME-EN-PRODUCCION"
+  # argon2 (recomendado) | bcrypt
+  password_hash: "argon2"
+
+  password_policy:
+    min_length: 10
+    require_uppercase: true
+    require_lowercase: true
+    require_digit: true
+    require_symbol: false
+    # Rechaza contraseñas que contengan el nombre de usuario o el email.
+    reject_username_in_password: true
+
+  session:
+    # Duración de la sesión desde el último uso.
+    lifetime: "7d"
+    # Duración absoluta máxima, se renueve o no. null = sin tope.
+    absolute_lifetime: "30d"
+    cookie_name: "drive_session"
+    # Marca la cookie como Secure. Ponlo en true en cuanto tengas HTTPS.
+    cookie_secure: false
+    cookie_samesite: "lax"
+    # Cerrar todas las sesiones del usuario al cambiar la contraseña.
+    revoke_on_password_change: true
+
+  lockout:
+    enabled: true
+    # Intentos fallidos consecutivos antes de bloquear la cuenta.
+    max_attempts: 5
+    # Ventana en la que se cuentan los intentos.
+    window: "15m"
+    # Tiempo que dura el bloqueo.
+    duration: "30m"
+    # Bloquear también por IP de origen, no sólo por cuenta.
+    track_by_ip: true
+
+  totp:
+    # Segundo factor por app (Google Authenticator, Aegis, etc.).
+    enabled: true
+    # Obligar 2FA a todos los usuarios con estos roles.
+    required_for_roles: ["admin"]
+    issuer: "Drive"
+
+  # Cabeceras de endurecimiento en todas las respuestas.
+  headers:
+    hsts: false          # Actívalo sólo cuando sirvas por HTTPS.
+    content_security_policy: "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    frame_options: "DENY"
+    referrer_policy: "same-origin"
+
+rate_limit:
+  enabled: true
+  # Peticiones permitidas por ventana y por IP, por familia de endpoint.
+  login: { requests: 10, window: "5m" }
+  signup: { requests: 5, window: "1h" }
+  api: { requests: 600, window: "1m" }
+  download: { requests: 300, window: "1m" }
+  # IPs y redes exentas de cualquier límite.
+  exempt_networks:
+    - "127.0.0.1/32"
+
+# -----------------------------------------------------------------------------
+# Acceso por red — el "no me pidas usuario si estoy en casa"
+# -----------------------------------------------------------------------------
+network:
+  # Redes consideradas de confianza. Se evalúan contra la IP real del cliente
+  # (ver server.behind_proxy / trusted_proxies).
+  trusted_networks:
+    - "192.168.0.0/16"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+
+  # Qué ocurre cuando alguien entra desde una red de confianza:
+  #   none      -> nada, se pide login igual que desde fuera.
+  #   readonly  -> puede navegar y descargar sin login, pero no modificar.
+  #   full      -> sesión automática como el usuario de trusted_user.
+  trusted_mode: "readonly"
+
+  # Usuario suplantado con trusted_mode: full. Debe existir.
+  trusted_user: null
+
+  # Con trusted_mode distinto de none, qué se ve sin iniciar sesión:
+  #   public       -> sólo lo marcado como público (igual que desde fuera).
+  #   shared       -> lo público + lo compartido con el usuario "lan".
+  #   trusted_user -> todo el contenido de network.trusted_user.
+  trusted_scope: "shared"
+
+  # Aun estando en red de confianza, estas acciones siguen pidiendo login.
+  # Opciones: upload, delete, share, admin, settings, download
+  require_login_for:
+    - "upload"
+    - "delete"
+    - "share"
+    - "admin"
+    - "settings"
+
+  # Permitir que un usuario ya autenticado siga su sesión desde otra IP.
+  # Con false, la sesión se invalida si cambia la IP (rompe móviles en 4G/wifi).
+  allow_session_ip_change: true
+
+  # Bloqueo por geografía o por red, evaluado antes que cualquier otra regla.
+  denied_networks: []
+
+# -----------------------------------------------------------------------------
+# Compartición
+# -----------------------------------------------------------------------------
+sharing:
+  # Compartir con otros usuarios de la instancia.
+  internal_enabled: true
+  # Enlaces públicos con token, accesibles sin cuenta.
+  public_links_enabled: true
+  # Roles que pueden crear enlaces públicos.
+  public_links_roles: ["admin", "user"]
+  # Obliga a que todo enlace público lleve contraseña.
+  require_password_on_public_links: false
+  # Caducidad por defecto de un enlace nuevo. null = no caduca.
+  default_link_expiry: "30d"
+  # Caducidad máxima que un usuario puede poner. null = sin tope.
+  max_link_expiry: "365d"
+  # Permitir enlaces de subida (el visitante deja ficheros sin ver el resto).
+  allow_upload_links: true
+  # Permitir que quien recibe algo compartido lo vuelva a compartir.
+  allow_reshare: false
+  # Longitud del token de los enlaces públicos.
+  token_length: 22
+  # Límite de descargas por defecto en enlaces nuevos. null = ilimitado.
+  default_download_limit: null
+
+# -----------------------------------------------------------------------------
+# Perfiles: valores por rol. Cada usuario puede tener overrides propios
+# gestionados desde el panel de administración.
+# -----------------------------------------------------------------------------
+roles:
+  admin:
+    quota: null                 # null = ilimitada
+    max_upload_size: null       # null = hereda de storage.max_upload_size
+    can_share_public: true
+    can_share_internal: true
+    can_upload: true
+    can_delete: true
+    can_manage_users: true
+    can_edit_settings: true
+  user:
+    quota: "10GB"
+    max_upload_size: "2GB"
+    can_share_public: true
+    can_share_internal: true
+    can_upload: true
+    can_delete: true
+    can_manage_users: false
+    can_edit_settings: false
+  guest:
+    quota: "500MB"
+    max_upload_size: "100MB"
+    can_share_public: false
+    can_share_internal: false
+    can_upload: false
+    can_delete: false
+    can_manage_users: false
+    can_edit_settings: false
+
+# -----------------------------------------------------------------------------
+# Registro y auditoría
+# -----------------------------------------------------------------------------
+logging:
+  # debug | info | warning | error
+  level: "info"
+  # Fichero de log. null = sólo stdout (recomendado bajo systemd).
+  file: null
+  # Registrar cada acceso HTTP.
+  access_log: true
+
+audit:
+  enabled: true
+  # Eventos registrados en la tabla de auditoría.
+  events:
+    - "login"
+    - "login_failed"
+    - "logout"
+    - "upload"
+    - "download"
+    - "delete"
+    - "share_create"
+    - "share_access"
+    - "user_create"
+    - "settings_change"
+  # Antigüedad máxima de los registros de auditoría.
+  retention: "180d"
+  # Guardar la IP del cliente en cada evento.
+  store_ip: true
+
+# -----------------------------------------------------------------------------
+# Interfaz
+# -----------------------------------------------------------------------------
+ui:
+  theme: "auto"                 # auto | light | dark
+  items_per_page: 100
+  # Mostrar en el login un aviso de que la red actual es de confianza.
+  show_trusted_network_hint: true
+  # Texto libre mostrado en el pie de la interfaz. null = ninguno.
+  footer_text: null
+
+# -----------------------------------------------------------------------------
+# Mantenimiento — tareas periódicas del proceso en segundo plano
+# -----------------------------------------------------------------------------
+maintenance:
+  enabled: true
+  # Cada cuánto se ejecutan las tareas de limpieza.
+  interval: "1h"
+  # Purga de papelera, versiones caducadas, sesiones muertas, auditoría vieja
+  # y blobs huérfanos.
+  purge_trash: true
+  purge_versions: true
+  purge_sessions: true
+  purge_audit: true
+  purge_orphan_blobs: true

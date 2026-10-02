@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+config/config.local.yaml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Cliente de escritorio
+desktop/build/
+*.log

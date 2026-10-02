@@ -1,0 +1,229 @@
+# Esquema y consultas de uso común.
+#
+# Las marcas de tiempo son INTEGER en milisegundos UTC; los booleanos, 0/1; y
+# los diccionarios y listas (permission_overrides, preferences, scopes,
+# allowed_networks, detail), texto JSON. No se declaran claves foráneas: las
+# cascadas las hace el código (ver files_service.purge y admin.delete_user).
+#
+# El esquema se crea en `on start:` (más abajo). Cambiar de motor a
+# PostgreSQL es sustituir "sqlite." por "postgres." en las llamadas: todas usan
+# el marcador "?" y los ids se generan en la aplicación.
+
+fn List<string> schema():
+    return [
+        """
+        create table if not exists users (
+            id text primary key,
+            username text not null unique,
+            email text unique,
+            password_hash text not null,
+            role text not null default 'user',
+            display_name text,
+            bio text,
+            avatar_node_id text,
+            is_active integer not null default 1,
+            is_approved integer not null default 1,
+            quota_override integer,
+            max_upload_override integer,
+            permission_overrides text not null default '{}',
+            storage_used integer not null default 0,
+            totp_secret text,
+            totp_enabled integer not null default 0,
+            preferences text not null default '{}',
+            created_at integer not null,
+            last_login_at integer,
+            password_changed_at integer not null,
+            locked_until integer
+        )
+        """,
+        """
+        create table if not exists sessions (
+            id text primary key,
+            user_id text not null,
+            created_at integer not null,
+            last_seen_at integer not null,
+            expires_at integer not null,
+            absolute_expires_at integer,
+            ip text,
+            user_agent text,
+            revoked integer not null default 0,
+            from_trusted_network integer not null default 0,
+            pending_totp integer not null default 0
+        )
+        """,
+        "create index if not exists ix_sessions_user on sessions (user_id)",
+        "create index if not exists ix_sessions_expires on sessions (expires_at)",
+        """
+        create table if not exists api_tokens (
+            id text primary key,
+            user_id text not null,
+            name text not null,
+            token_hash text not null unique,
+            scopes text not null default '[]',
+            created_at integer not null,
+            last_used_at integer,
+            expires_at integer,
+            revoked integer not null default 0
+        )
+        """,
+        "create index if not exists ix_api_tokens_user on api_tokens (user_id)",
+        """
+        create table if not exists login_attempts (
+            id integer primary key autoincrement,
+            key text not null,
+            at integer not null,
+            success integer not null default 0
+        )
+        """,
+        "create index if not exists ix_login_attempts_key on login_attempts (key)",
+        "create index if not exists ix_login_attempts_at on login_attempts (at)",
+        """
+        create table if not exists blobs (
+            hash text primary key,
+            size integer not null,
+            refcount integer not null default 0,
+            created_at integer not null
+        )
+        """,
+        """
+        create table if not exists nodes (
+            id text primary key,
+            owner_id text not null,
+            parent_id text,
+            name text not null,
+            is_dir integer not null default 0,
+            blob_hash text,
+            size integer not null default 0,
+            mime_type text,
+            is_public integer not null default 0,
+            lan_visible integer not null default 0,
+            starred integer not null default 0,
+            description text,
+            created_at integer not null,
+            updated_at integer not null,
+            deleted_at integer,
+            trashed_from_id text
+        )
+        """,
+        "create index if not exists ix_nodes_owner on nodes (owner_id)",
+        "create index if not exists ix_nodes_parent on nodes (parent_id)",
+        "create index if not exists ix_nodes_parent_name on nodes (parent_id, name)",
+        "create index if not exists ix_nodes_owner_deleted on nodes (owner_id, deleted_at)",
+        "create index if not exists ix_nodes_public on nodes (is_public)",
+        "create index if not exists ix_nodes_deleted on nodes (deleted_at)",
+        """
+        create table if not exists node_versions (
+            id text primary key,
+            node_id text not null,
+            blob_hash text not null,
+            size integer not null,
+            created_at integer not null,
+            created_by text
+        )
+        """,
+        "create index if not exists ix_versions_node on node_versions (node_id)",
+        "create index if not exists ix_versions_created on node_versions (created_at)",
+        """
+        create table if not exists shares (
+            id text primary key,
+            node_id text not null,
+            user_id text not null,
+            permission text not null default 'read',
+            created_by text not null,
+            created_at integer not null,
+            expires_at integer,
+            message text,
+            unique (node_id, user_id)
+        )
+        """,
+        "create index if not exists ix_shares_user on shares (user_id)",
+        """
+        create table if not exists share_links (
+            id text primary key,
+            token text not null unique,
+            node_id text not null,
+            created_by text not null,
+            mode text not null default 'download',
+            password_hash text,
+            created_at integer not null,
+            expires_at integer,
+            download_limit integer,
+            download_count integer not null default 0,
+            allow_listing integer not null default 1,
+            allowed_networks text not null default '[]',
+            revoked integer not null default 0,
+            note text
+        )
+        """,
+        "create index if not exists ix_links_node on share_links (node_id)",
+        """
+        create table if not exists audit_log (
+            id integer primary key autoincrement,
+            at integer not null,
+            event text not null,
+            user_id text,
+            actor text,
+            ip text,
+            target_type text,
+            target_id text,
+            detail text not null default '{}'
+        )
+        """,
+        "create index if not exists ix_audit_at on audit_log (at)",
+        "create index if not exists ix_audit_event on audit_log (event)",
+        "create index if not exists ix_audit_user on audit_log (user_id)",
+        """
+        create table if not exists settings (
+            key text primary key,
+            value text not null,
+            updated_at integer not null,
+            updated_by text
+        )
+        """
+    ]
+
+# Crea el esquema (idempotente) y avisa de configuraciones peligrosas. Lux
+# retiene las peticiones (503) hasta que termina.
+on start:
+    for string ddl in schema():
+        await sqlite.exec(ddl)
+    Json cf = await config()
+    for string w in config_warnings(cf):
+        log.warn(w)
+    log.info(cf["app.name"] + " listo en " + cf["app.base_url"])
+
+fn Json first(List<Json> rows):
+    return len(rows) == 0 ? null : rows[0]
+
+fn Json get_user(Json id):
+    if id == null:
+        return null
+    return first(await sqlite.query("select * from users where id = ?", id))
+
+fn Json get_user_by_name(string username):
+    return first(await sqlite.query("select * from users where username = ?", username))
+
+fn Json get_node(Json id):
+    if id == null or id == "":
+        return null
+    return first(await sqlite.query("select * from nodes where id = ?", id))
+
+fn int count_of(string sql):
+    List<Json> rows = await sqlite.query(sql)
+    return rows[0]["n"]
+
+# JSON guardado como texto -> valor. Un texto vacío o inválido da el valor
+# por defecto.
+fn Json parse_json_text(Json raw, Json fallback):
+    if raw == null or raw == "":
+        return fallback
+    try:
+        return json.parse(raw)
+    catch e:
+        return fallback
+
+# Fila de usuario -> nombre mostrable.
+fn string user_label(Json user):
+    if user == null:
+        return "—"
+    return user["display_name"] == null or user["display_name"] == "" ? user["username"] : user["display_name"]

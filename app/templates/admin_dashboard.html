@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Administración · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row" style="margin-bottom:16px">
+  <a class="button primary" href="/admin">Resumen</a>
+  <a class="button" href="/admin/users">Usuarios</a>
+  <a class="button" href="/admin/settings">Ajustes</a>
+  <a class="button" href="/admin/audit">Auditoría</a>
+</div>
+
+{% for warning in warnings %}
+  <div class="notice warn">{{ warning }}</div>
+{% endfor %}
+
+<div class="grid cols-3">
+  <div class="stat"><b>{{ stats.users }}</b><span>usuarios{% if stats.pending %} · {{ stats.pending }} pendientes{% endif %}</span></div>
+  <div class="stat"><b>{{ stats.files }}</b><span>ficheros</span></div>
+  <div class="stat"><b>{{ stats.public }}</b><span>elementos públicos</span></div>
+  <div class="stat"><b>{{ stats.sessions }}</b><span>sesiones activas</span></div>
+  <div class="stat"><b>{{ stats.logical|size }}</b><span>tamaño lógico</span></div>
+  <div class="stat"><b>{{ stats.physical|size }}</b><span>en disco ({{ stats.blobs }} blobs)</span></div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h2>Disco del servidor</h2>
+  {% set percent = (stats.disk_used * 100 / stats.disk_total)|round(1) if stats.disk_total else 0 %}
+  <p class="spread">
+    <span>{{ stats.disk_used|size }} de {{ stats.disk_total|size }}</span>
+    <span class="muted">{{ percent }}%</span>
+  </p>
+  <div class="meter {% if percent > 90 %}full{% endif %}"><span style="width: {{ percent }}%"></span></div>
+  {% if stats.logical > stats.physical %}
+    <p class="muted" style="margin-top:10px">
+      La deduplicación ahorra {{ (stats.logical - stats.physical)|size }} respecto al tamaño lógico.
+    </p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Actividad reciente</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Cuándo</th><th>Evento</th><th>Quién</th><th class="hide-sm">Detalle</th></tr></thead>
+      <tbody>
+        {% for row in recent %}
+        <tr>
+          <td class="muted">{{ row.at|relative }}</td>
+          <td>{{ row.event }}</td>
+          <td>{{ row.actor or '—' }} <span class="muted mono">{{ row.ip or '' }}</span></td>
+          <td class="hide-sm muted">{{ row.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p style="margin-top:12px"><a href="/admin/audit">Ver toda la auditoría</a></p>
+</div>
+{% endblock %}

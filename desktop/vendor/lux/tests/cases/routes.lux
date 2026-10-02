@@ -1,0 +1,48 @@
+app:
+    port 8790
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+# Over 16 MB: a response that size used to be dropped unsent.
+get endpoint("/big"):
+    string s = "x"
+    while len(s) < 20000000:
+        s = s + s
+    return text(s)
+
+get endpoint("/echo/:id", int id):
+    return { "id": id }
+
+get endpoint("/pagina", int page = 1, int limit = 20):
+    return { "page": page, "limit": limit }
+
+group("/api/v1"):
+    get endpoint("/hello"):
+        return { "v": 1 }
+
+group("/admin"):
+    require query("k", "") == "abre" else status(403)
+
+    get endpoint("/panel"):
+        return { "panel": true }
+
+on error 404:
+    return { "error": "not found", "path": request.path }
+
+# A route's own error body is its answer; a bare status() gets the handler.
+get endpoint("/own_404"):
+    return { "error": "no such thing", "id": 7 }.status(404)
+
+get endpoint("/bare_404"):
+    return status(404)
+
+# get/post/put/patch/delete/options/any are only a route method right before
+# `endpoint`: anywhere else they are names.
+fn int any(int options):
+    return options + 1
+
+get endpoint("/method_names"):
+    string post = "p"
+    int delete = any(1)
+    return { "post": post, "delete": delete }

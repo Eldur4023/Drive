@@ -1,0 +1,39 @@
+# Salud, puerta de entrada común y página de error.
+
+# Todas las rutas de la aplicación cuelgan de un group("") cuyo guard es esta
+# función: corta a los clientes de las redes bloqueadas (network.denied_networks).
+fn bool gate_ok():
+    Json cf = await config()
+    return not is_denied_network(client_ip(cf), cf)
+
+get endpoint("/healthz"):
+    return { "status": "ok" }
+
+# Textos genéricos de Lux (los de abort()/status() con mensaje propio no están
+# aquí y se muestran tal cual).
+fn bool generic_message(string m):
+    return m == "" or in_list(m, ["Not Found", "Forbidden", "Unauthorized", "Bad Request", "Gone", "Too Many Requests", "Content Too Large", "Unprocessable Entity", "Internal Server Error", "Method Not Allowed", "Service Unavailable", "Validation failed"])
+
+# Errores en JSON para la API y en HTML para el navegador. Sirve a los que
+# produce Lux (ruta inexistente, petición no válida, fallo interno) y a los
+# abort()/status() de las rutas.
+on error:
+    Json cf = config_now()
+    int code = error.code
+    string detail = error.message
+    if code >= 500 or generic_message(detail):
+        detail = detail_for(code)
+    if code == 422 and len(error.messages) > 0:
+        detail = error.messages.join(" ")
+    if code >= 500:
+        log.error("error " + str(code) + " en " + request.method + " " + request.path + ": " + error.message)
+    if request.path.starts_with("/api") or header("Accept", "").contains("application/json"):
+        return { "detail": detail }
+    # Con la sesión, para que el menú sea el del usuario; si algo falla al
+    # leerla, como anónimo.
+    Json p = new_principal("", false)
+    try:
+        p = await get_principal(cf)
+    catch e:
+        p = new_principal("", false)
+    return render("error.html", c=ep(cf, p, code, detail))

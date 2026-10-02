@@ -1,0 +1,637 @@
+# Escenario "default": registro abierto, sin aprobación, sin límite de
+# peticiones y sin redes de confianza. Equivale a test_auth, test_files,
+# test_sharing, test_admin y test_pages de la versión Python, más 2FA, búsqueda,
+# miniaturas y movimientos, que no tenían cobertura.
+
+fn string PW():
+    return "Contrasena1"
+
+fn string IP():
+    return "203.0.113.9"
+
+fn Json me(Json c):
+    return (await get(c, "/api/me"))["body"]
+
+fn Json admin_client():
+    Json c = client(IP())
+    await login(c, "primero", PW())
+    return c
+
+# ── Autenticación ───────────────────────────────────────────────────────────
+
+fn bool t_auth(Json res):
+    Json c = client(IP())
+    await register(c, "primero", PW())
+    check(res, "primera cuenta: sesión abierta", await login(c, "primero", PW()), "sin cookie de sesión")
+    check(res, "primera cuenta es admin", me(c)["role"] == "admin", str(me(c)))
+
+    Json c2 = await user_client(IP(), "segundo", PW())
+    check(res, "segunda cuenta usa el rol por defecto", me(c2)["role"] == "user", str(me(c2)))
+
+    Json anon = client(IP())
+    Json r = await post(anon, "/register", { "username": "corto", "email": "", "password": "abc", "password2": "abc" })
+    check(res, "política de contraseña rechaza una corta", r["status"] == 400 and r["text"].contains("8 caracteres"), brief(r))
+
+    Json c3 = client(IP())
+    string name3 = uname("cred")
+    await register(c3, name3, PW())
+    Json c3b = client(IP())
+    Json wrong = await post(c3b, "/login", { "username": name3, "password": "loQueSea1", "next": "/" })
+    check(res, "credenciales incorrectas", wrong["status"] == 401 and wrong["text"].contains("incorrectos"), brief(wrong))
+
+    Json files = await get(client(IP()), "/files")
+    check(res, "sin sesión se redirige al login", files["status"] == 200 and files["text"].contains("Iniciar sesión") and files["text"].contains("action=\"/login\""), brief(files))
+
+    # Cerrar sesión la invalida en el servidor, no sólo en el navegador.
+    Json cu = await user_client(IP(), "usuario", PW())
+    check(res, "logout: antes autenticado", me(cu)["authenticated"], "no autenticado")
+    string old = cu["cookies"]["drive_session"]
+    await logout(cu)
+    check(res, "logout: el cliente queda sin sesión", not me(cu)["authenticated"], str(me(cu)))
+    Json replay = client(IP())
+    replay["cookies"]["drive_session"] = old
+    check(res, "logout: la cookie vieja ya no sirve", not me(replay)["authenticated"], str(me(replay)))
+
+    # Cambiar la contraseña cierra las demás sesiones y conserva la actual.
+    Json ca = await user_client(IP(), "cambio", PW())
+    Json cb = client(IP())
+    await login(cb, ca["name"], PW())
+    check(res, "cambio de contraseña: dos sesiones", me(ca)["authenticated"] and me(cb)["authenticated"], "")
+    await post(ca, "/profile/password", { "current": PW(), "password": "NuevaClave9", "password2": "NuevaClave9" })
+    check(res, "cambio de contraseña: la actual sobrevive", me(ca)["authenticated"], "")
+    check(res, "cambio de contraseña: las demás se cierran", not me(cb)["authenticated"], "")
+    Json cc = client(IP())
+    check(res, "cambio de contraseña: entra con la nueva", await login(cc, ca["name"], "NuevaClave9"), "")
+    Json cd = client(IP())
+    check(res, "cambio de contraseña: la vieja no entra", not await login(cd, ca["name"], PW()), "")
+
+    # Entrar con el correo.
+    Json ce = client(IP())
+    check(res, "login con correo", await login(ce, ca["name"] + "@example.com", "NuevaClave9"), "")
+    return true
+
+# ── Ficheros ────────────────────────────────────────────────────────────────
+
+fn bool t_files(Json res):
+    Json c = await user_client(IP(), "ana", PW())
+
+    Json up = await api_upload(c, "notas.txt", "hola mundo", "")
+    Json node = up["body"]
+    check(res, "subir: 201 y tamaño", up["status"] == 201 and node["size"] == 10, brief(up))
+    Json dl = await get(c, "/files/" + node["id"] + "/download")
+    check(res, "descargar: contenido", dl["text"] == "hola mundo", brief(dl))
+    check(res, "descargar: nombre en Content-Disposition", str(dl["headers"]["content-disposition"]).contains("notas.txt"), str(dl["headers"]))
+
+    Json etag_req = await call(c, "GET", "/files/" + node["id"] + "/download", null, { "If-None-Match": dl["headers"]["etag"] })
+    check(res, "descargar: ETag condicional -> 304", etag_req["status"] == 304, brief(etag_req))
+
+    # Carpetas y jerarquía.
+    Json folder = (await post(c, "/api/folders", { "name": "Documentos" }))["body"]
+    Json inside = (await api_upload(c, "dentro.txt", "x", folder["id"]))["body"]
+    Json listing = (await get(c, "/api/files?parent_id=" + folder["id"]))["body"]
+    check(res, "jerarquía: listado de la carpeta", len(listing["items"]) == 1 and listing["items"][0]["id"] == inside["id"], str(listing))
+    Json detail = (await get(c, "/api/files/" + inside["id"]))["body"]
+    check(res, "jerarquía: ruta", len(detail["path"]) == 2 and detail["path"][0]["name"] == "Documentos" and detail["path"][1]["name"] == "dentro.txt", str(detail))
+
+    # Nombres duplicados.
+    Json first = (await api_upload(c, "informe.txt", "uno", ""))["body"]
+    Json second = (await api_upload(c, "informe.txt", "dos", ""))["body"]
+    check(res, "duplicados: se desambiguan", first["name"] == "informe.txt" and second["name"] == "informe (2).txt", first["name"] + " / " + second["name"])
+
+    # Deduplicación: el mismo contenido ocupa un único blob.
+    string content = "contenido identico " + hash.uuid()
+    await api_upload(c, "a.txt", content, "")
+    await api_upload(c, "b.txt", content, "")
+    string digest = hash.sha256(content)
+    int copies = 0
+    for string f in os.list_dir(os.getenv("TEST_BLOBS", ""), true):
+        if f.ends_with(digest):
+            copies = copies + 1
+    check(res, "deduplicación: un solo blob", copies == 1, "copias: " + str(copies))
+    check(res, "deduplicación: sin temporales", len(os.list_dir(os.path_join(os.getenv("TEST_BLOBS", ""), "tmp"), true)) == 0, "quedan temporales")
+
+    # Extensión bloqueada.
+    Json exe = await api_upload(c, "virus.exe", "MZ", "")
+    check(res, "extensión bloqueada", exe["status"] == 400 and exe["text"].contains("exe"), brief(exe))
+
+    # Papelera y restauración.
+    Json c2 = await user_client(IP(), "papelera", PW())
+    Json tr = (await api_upload(c2, "borrable.txt", "adios", ""))["body"]
+    await call(c2, "DELETE", "/api/files/" + tr["id"], null, {})
+    check(res, "papelera: sale del listado", len((await get(c2, "/api/files"))["body"]["items"]) == 0, "")
+    check(res, "papelera: aparece en la papelera", (await get(c2, "/api/trash"))["body"]["items"][0]["id"] == tr["id"], "")
+    await post(c2, "/api/files/" + tr["id"] + "/restore", null)
+    check(res, "papelera: se restaura", (await get(c2, "/api/files"))["body"]["items"][0]["id"] == tr["id"], "")
+
+    # Borrado definitivo libera espacio.
+    Json c3 = await user_client(IP(), "espacio", PW())
+    Json big = (await api_upload(c3, "grande.txt", "z".repeat(500), ""))["body"]
+    check(res, "espacio: usado tras subir", (await get(c3, "/api/usage"))["body"]["used"] == 500, str((await get(c3, "/api/usage"))["body"]))
+    await call(c3, "DELETE", "/api/files/" + big["id"] + "?permanent=true", null, {})
+    check(res, "espacio: se libera al borrar", (await get(c3, "/api/usage"))["body"]["used"] == 0, str((await get(c3, "/api/usage"))["body"]))
+
+    # Versiones al sobrescribir.
+    Json c4 = await user_client(IP(), "versiones", PW())
+    Json v1 = (await api_upload(c4, "doc.txt", "version uno", ""))["body"]
+    Json v2 = await upload_file(c4, "/api/files", "file", "doc.txt", "version dos", { "overwrite": "true" })
+    check(res, "versiones: reutiliza el nodo", v2["status"] == 201 and v2["body"]["id"] == v1["id"], brief(v2))
+    check(res, "versiones: contenido nuevo", (await get(c4, "/files/" + v1["id"] + "/download"))["text"] == "version dos", "")
+    Json vd = await get(c4, "/files/" + v1["id"] + "/detail")
+    check(res, "versiones: aparece el historial", vd["text"].contains("Versiones anteriores"), brief(vd))
+    string version_id = between(vd["text"], "/versions/", "/restore")
+    await post(c4, "/files/" + v1["id"] + "/versions/" + version_id + "/restore", null)
+    check(res, "versiones: restaurar", (await get(c4, "/files/" + v1["id"] + "/download"))["text"] == "version uno", "")
+
+    # Rango.
+    Json c5 = await user_client(IP(), "rango", PW())
+    Json vid = (await api_upload(c5, "video.bin", "0123456789", ""))["body"]
+    Json rg = await call(c5, "GET", "/files/" + vid["id"] + "/download", null, { "Range": "bytes=2-5" })
+    check(res, "rango: 206 y contenido", rg["status"] == 206 and rg["text"] == "2345", brief(rg))
+    check(res, "rango: Content-Range", rg["headers"]["content-range"] == "bytes 2-5/10", str(rg["headers"]))
+
+    # No se puede mover una carpeta dentro de sí misma.
+    Json c6 = await user_client(IP(), "ciclo", PW())
+    Json padre = (await post(c6, "/api/folders", { "name": "padre" }))["body"]
+    Json hijo = (await post(c6, "/api/folders", { "name": "hijo", "parent_id": padre["id"] }))["body"]
+    Json cyc = await call(c6, "PATCH", "/api/files/" + padre["id"], { "parent_id": hijo["id"] }, {})
+    check(res, "mover: no dentro de sí misma", cyc["status"] == 400, brief(cyc))
+
+    # Nombres con separadores.
+    Json c7 = await user_client(IP(), "saneo", PW())
+    Json bad = (await api_upload(c7, "../../etc/passwd", "raiz", ""))["body"]
+    check(res, "nombre con separadores se sanea", not str(bad["name"]).contains("/") and not str(bad["name"]).starts_with("."), str(bad))
+    return true
+
+# Operaciones desde la interfaz web: mover, copiar, destacar, buscar, vaciar.
+fn bool t_files_ui(Json res):
+    Json c = await user_client(IP(), "interfaz", PW())
+    Json f = (await api_upload(c, "informe final.txt", "contenido", ""))["body"]
+    Json dst = (await post(c, "/api/folders", { "name": "Destino" }))["body"]
+
+    await post(c, "/files/" + f["id"] + "/move", { "target_id": dst["id"] })
+    check(res, "UI mover: el fichero está en la carpeta", (await get(c, "/api/files/" + f["id"]))["body"]["parent_id"] == dst["id"], "")
+    await post(c, "/files/" + f["id"] + "/copy", { "target_id": "" })
+    check(res, "UI copiar: aparece una copia en la raíz", len((await get(c, "/api/files"))["body"]["items"]) == 2, str((await get(c, "/api/files"))["body"]))
+    await post(c, "/files/" + f["id"] + "/rename", { "name": "renombrado.txt" })
+    check(res, "UI renombrar", (await get(c, "/api/files/" + f["id"]))["body"]["name"] == "renombrado.txt", "")
+    await post(c, "/files/" + f["id"] + "/star", null)
+    check(res, "UI destacar", (await get(c, "/api/files/" + f["id"]))["body"]["starred"], "")
+    await post(c, "/files/mkdir", { "name": "Nueva", "parent_id": "" })
+    check(res, "UI crear carpeta", (await get(c, "/files"))["text"].contains("Nueva"), "")
+
+    # Subida desde el formulario.
+    Json up = await upload_file(c, "/files/upload", "files", "desde-web.txt", "datos", { "parent_id": dst["id"] })
+    check(res, "UI subir: aviso y fichero", up["text"].contains("desde-web.txt") or up["text"].contains("subidos"), brief(up))
+    check(res, "UI subir: queda en la carpeta", len((await get(c, "/api/files?parent_id=" + dst["id"]))["body"]["items"]) == 2, "")
+
+    # Búsqueda, con comodines escapados.
+    await api_upload(c, "100%_real.txt", "x", "")
+    await api_upload(c, "otro.txt", "x", "")
+    Json s1 = await get(c, "/search?q=renombrado")
+    check(res, "buscar: encuentra por nombre", s1["text"].contains("renombrado.txt"), brief(s1))
+    Json s2 = await get(c, "/api/search?q=100%25_")
+    check(res, "buscar: % y _ no son comodines", len(s2["body"]["items"]) == 1 and s2["body"]["items"][0]["name"] == "100%_real.txt", str(s2["body"]))
+
+    # Papelera por la interfaz y vaciado.
+    await post(c, "/files/" + f["id"] + "/trash", null)
+    Json tp = await get(c, "/trash")
+    check(res, "UI papelera: lista lo borrado", tp["text"].contains("renombrado.txt"), brief(tp))
+    await post(c, "/trash/empty", null)
+    check(res, "UI papelera: vaciar", len((await get(c, "/api/trash"))["body"]["items"]) == 0, "")
+
+    # Miniatura de una imagen (PNG de 1x1).
+    string png = encoding.hex_decode("89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082")
+    Json img = (await upload_file(c, "/api/files", "file", "punto.png", png, {}))["body"]
+    Json th = await get(c, "/files/" + img["id"] + "/thumb")
+    check(res, "miniatura: webp", th["status"] == 200 and th["headers"]["content-type"] == "image/webp", brief(th))
+    Json th2 = await get(c, "/files/" + f["id"] + "/thumb")
+    check(res, "miniatura: un txt no tiene", th2["status"] == 404, brief(th2))
+    return true
+
+# ── Compartición ────────────────────────────────────────────────────────────
+
+fn bool t_sharing(Json res):
+    Json ana = await user_client(IP(), "dueno", PW())
+    Json bruno = await user_client(IP(), "invitado", PW())
+    Json node = (await api_upload(ana, "informe.txt", "datos", ""))["body"]
+
+    check(res, "lo ajeno no se ve (404)", (await get(bruno, "/api/files/" + node["id"]))["status"] == 404, "")
+
+    Json sh = await post(ana, "/api/files/" + node["id"] + "/shares", { "username": bruno["name"], "permission": "read" })
+    check(res, "compartir: 201", sh["status"] == 201, brief(sh))
+    check(res, "compartir: permiso de lectura", (await get(bruno, "/api/files/" + node["id"]))["body"]["permission"] == "read", "")
+    check(res, "compartir: descarga", (await get(bruno, "/files/" + node["id"] + "/download"))["text"] == "datos", "")
+    check(res, "compartir: aparece en /api/shared", (await get(bruno, "/api/shared"))["body"]["items"][0]["id"] == node["id"], "")
+    check(res, "lectura no permite borrar", (await call(bruno, "DELETE", "/api/files/" + node["id"], null, {}))["status"] == 403, "")
+    Json bad = await post(ana, "/api/files/" + node["id"] + "/shares", { "username": bruno["name"], "permission": "owner" })
+    check(res, "compartir: no se concede 'owner'", bad["status"] == 400, brief(bad))
+
+    # Herencia por carpeta.
+    Json carpeta = (await post(ana, "/api/folders", { "name": "equipo" }))["body"]
+    Json dentro = (await api_upload(ana, "acta.txt", "acta", carpeta["id"]))["body"]
+    await post(ana, "/api/files/" + carpeta["id"] + "/shares", { "username": bruno["name"], "permission": "write" })
+    Json d = (await get(bruno, "/api/files/" + dentro["id"]))["body"]
+    check(res, "herencia: permiso de escritura", d["permission"] == "write" and d["access_via"] == "share", str(d))
+    Json up = await api_upload(bruno, "aporte.txt", "mio", carpeta["id"])
+    check(res, "herencia: el invitado sube a la carpeta compartida", up["status"] == 201, brief(up))
+    check(res, "herencia: el fichero pertenece al dueño", up["body"]["owner_id"] == (await get(ana, "/api/me"))["body"]["id"], str(up["body"]))
+
+    # Quitar la compartición.
+    Json dt = await get(ana, "/files/" + carpeta["id"] + "/detail")
+    string share_id = between(dt["text"], "/shares/", "/delete")
+    await post(ana, "/shares/" + share_id + "/delete", null)
+    check(res, "descompartir: ya no se ve", (await get(bruno, "/api/files/" + dentro["id"]))["status"] == 404, "")
+
+    # Público.
+    Json pub = (await api_upload(ana, "folleto.pdf", "contenido publico", ""))["body"]
+    await call(ana, "PATCH", "/api/files/" + pub["id"], { "is_public": "true" }, {})
+    Json anon = client(IP())
+    check(res, "público: página sin cuenta", (await get(anon, "/p/" + pub["id"]))["status"] == 200, "")
+    check(res, "público: descarga sin cuenta", (await get(anon, "/p/" + pub["id"] + "/download"))["text"] == "contenido publico", "")
+    check(res, "público: aparece en /browse", (await get(anon, "/browse"))["text"].contains("folleto.pdf"), "")
+    await call(ana, "PATCH", "/api/files/" + pub["id"], { "is_public": "false" }, {})
+    check(res, "público: dejar de serlo", (await get(anon, "/p/" + pub["id"]))["status"] == 404, "")
+
+    # Enlace con token.
+    Json cmp = (await api_upload(ana, "compartido.txt", "por enlace", ""))["body"]
+    Json link = (await post(ana, "/api/files/" + cmp["id"] + "/links", { "mode": "download" }))["body"]
+    string token = link["url"].split("/")[len(link["url"].split("/")) - 1]
+    check(res, "enlace: página", (await get(anon, "/s/" + token))["status"] == 200, "")
+    check(res, "enlace: descarga", (await get(anon, "/s/" + token + "/download/" + cmp["id"]))["text"] == "por enlace", "")
+
+    # Enlace con contraseña.
+    Json rsv = (await api_upload(ana, "reservado.txt", "protegido", ""))["body"]
+    Json plink = (await post(ana, "/api/files/" + rsv["id"] + "/links", { "mode": "download", "password": "abreteSesamo" }))["body"]
+    string ptoken = plink["url"].split("/")[len(plink["url"].split("/")) - 1]
+    Json guest = client(IP())
+    check(res, "enlace con contraseña: la pide", (await get(guest, "/s/" + ptoken))["text"].contains("Enlace protegido"), "")
+    check(res, "enlace con contraseña: la incorrecta se rechaza", (await post(guest, "/s/" + ptoken, { "password": "otra" }))["status"] == 401, "")
+    await post(guest, "/s/" + ptoken, { "password": "abreteSesamo" })
+    check(res, "enlace con contraseña: la correcta desbloquea", (await get(guest, "/s/" + ptoken + "/download/" + rsv["id"]))["text"] == "protegido", "")
+    check(res, "enlace con contraseña: sin desbloqueo no descarga", (await get(client(IP()), "/s/" + ptoken + "/download/" + rsv["id"]))["text"].contains("Enlace protegido"), "")
+
+    # Revocado.
+    Json tmp = (await api_upload(ana, "temporal.txt", "x", ""))["body"]
+    Json rlink = (await post(ana, "/api/files/" + tmp["id"] + "/links", {}))["body"]
+    string rtoken = rlink["url"].split("/")[len(rlink["url"].split("/")) - 1]
+    await post(ana, "/links/" + rlink["id"] + "/revoke", null)
+    check(res, "enlace revocado -> 410", (await get(anon, "/s/" + rtoken))["status"] == 410, "")
+
+    # Límite de descargas.
+    Json lim = (await api_upload(ana, "limitado.txt", "x", ""))["body"]
+    Json llink = (await post(ana, "/api/files/" + lim["id"] + "/links", { "download_limit": "1" }))["body"]
+    string ltoken = llink["url"].split("/")[len(llink["url"].split("/")) - 1]
+    check(res, "límite de descargas: la primera pasa", (await get(anon, "/s/" + ltoken + "/download/" + lim["id"]))["status"] == 200, "")
+    check(res, "límite de descargas: la segunda -> 410", (await get(anon, "/s/" + ltoken + "/download/" + lim["id"]))["status"] == 410, "")
+
+    # Buzón de subida.
+    Json bz = (await post(ana, "/api/folders", { "name": "buzon" }))["body"]
+    Json blink = (await post(ana, "/api/files/" + bz["id"] + "/links", { "mode": "upload" }))["body"]
+    string btoken = blink["url"].split("/")[len(blink["url"].split("/")) - 1]
+    await upload_file(anon, "/s/" + btoken + "/upload", "files", "de-fuera.txt", "aportacion externa", { "node_id": bz["id"] })
+    Json items = (await get(ana, "/api/files?parent_id=" + bz["id"]))["body"]["items"]
+    check(res, "buzón: el fichero llega", len(items) == 1 and items[0]["name"] == "de-fuera.txt", str(items))
+    check(res, "buzón: no se puede descargar", (await get(anon, "/s/" + btoken + "/download/" + items[0]["id"]))["status"] == 403, "")
+    return true
+
+# Enlaces a carpetas: listado, navegación, sin listado y miguitas.
+fn bool t_links_ui(Json res):
+    Json ana = await user_client(IP(), "enlaces", PW())
+    Json padre = (await post(ana, "/api/folders", { "name": "SecretoPadre" }))["body"]
+    Json raiz = (await post(ana, "/api/folders", { "name": "Compartida", "parent_id": padre["id"] }))["body"]
+    Json sub = (await post(ana, "/api/folders", { "name": "Interior", "parent_id": raiz["id"] }))["body"]
+    Json f = (await api_upload(ana, "dentro.txt", "contenido", sub["id"]))["body"]
+    Json outside = (await api_upload(ana, "fuera.txt", "x", padre["id"]))["body"]
+
+    Json link = (await post(ana, "/api/files/" + raiz["id"] + "/links", { "mode": "download" }))["body"]
+    string token = link["url"].split("/")[len(link["url"].split("/")) - 1]
+    Json anon = client(IP())
+    Json page = await get(anon, "/s/" + token)
+    check(res, "enlace a carpeta: lista el contenido", page["text"].contains("Interior"), brief(page))
+    Json inner = await get(anon, "/s/" + token + "?node_id=" + sub["id"])
+    check(res, "enlace a carpeta: se navega a las subcarpetas", inner["text"].contains("dentro.txt"), brief(inner))
+    check(res, "enlace a carpeta: las miguitas no revelan lo de arriba", not inner["text"].contains("SecretoPadre"), "")
+    check(res, "enlace a carpeta: descarga de un fichero interior", (await get(anon, "/s/" + token + "/download/" + f["id"]))["text"] == "contenido", "")
+    check(res, "enlace a carpeta: nada fuera de la carpeta", (await get(anon, "/s/" + token + "?node_id=" + outside["id"]))["status"] == 404, "")
+    check(res, "enlace a carpeta: descarga fuera de la carpeta -> 404", (await get(anon, "/s/" + token + "/download/" + outside["id"]))["status"] == 404, "")
+    check(res, "enlace a carpeta: sin permiso de subida", (await upload_file(anon, "/s/" + token + "/upload", "files", "x.txt", "x", { "node_id": raiz["id"] }))["status"] == 403, "")
+
+    # Sin listado: sólo sirve para la propia carpeta.
+    Json nolist = await call(ana, "POST", "/files/" + raiz["id"] + "/link", { "mode": "download", "allow_listing": "" }, {})
+    # El enlace más reciente es el primero de /links.
+    string newest = between((await get(ana, "/links"))["text"], "<span class=\"mono\">", "</span>")
+    string t2 = newest.split("/")[len(newest.split("/")) - 1]
+    Json nl = await get(anon, "/s/" + t2)
+    check(res, "enlace sin listado: la carpeta no es visible", nl["text"].contains("no es visible"), brief(nl))
+
+    # Un token que no existe.
+    check(res, "enlace inexistente -> 404", (await get(anon, "/s/noexiste1234567890abcd"))["status"] == 404, "")
+
+    # Papelera por la interfaz: restaurar y eliminar definitivamente.
+    Json g = (await api_upload(ana, "papel.txt", "p" + hash.uuid(), ""))["body"]
+    await post(ana, "/files/" + g["id"] + "/trash", null)
+    await post(ana, "/files/" + g["id"] + "/restore", null)
+    check(res, "UI papelera: restaurar", (await get(ana, "/api/files/" + g["id"]))["body"]["trashed"] == false, "")
+    await post(ana, "/files/" + g["id"] + "/trash", null)
+    await post(ana, "/files/" + g["id"] + "/purge", null)
+    check(res, "UI papelera: eliminar definitivamente", (await get(ana, "/api/files/" + g["id"]))["status"] == 404, "")
+
+    # Visibilidad por la interfaz.
+    await post(ana, "/files/" + outside["id"] + "/visibility", { "is_public": "true", "lan_visible": "" })
+    check(res, "UI visibilidad: público", (await get(anon, "/p/" + outside["id"]))["status"] == 200, "")
+    # Renombrar por la API.
+    Json rn = await call(ana, "PATCH", "/api/files/" + outside["id"], { "name": "nuevo-nombre.txt" }, {})
+    check(res, "API: renombrar", rn["body"]["name"] == "nuevo-nombre.txt", brief(rn))
+    return true
+
+# ── Administración ──────────────────────────────────────────────────────────
+
+fn bool t_admin(Json res):
+    Json admin = await admin_client()
+    Json normal = await user_client(IP(), "normal", PW())
+    check(res, "sólo el admin entra al panel", (await get(normal, "/admin"))["status"] == 403 and (await get(admin, "/admin"))["status"] == 200, "")
+
+    # Crear usuarios con cuota.
+    string nuevo = uname("nuevo")
+    await post(admin, "/admin/users", { "username": nuevo, "email": nuevo + "@example.com", "password": PW(), "role": "user", "quota": "5GB" })
+    Json cn = client(IP())
+    await login(cn, nuevo, PW())
+    check(res, "admin crea usuarios con cuota", me(cn)["quota"] == 5 * 1024 * 1024 * 1024, str(me(cn)))
+
+    # Perfil guest.
+    string inv = uname("invitadog")
+    await post(admin, "/admin/users", { "username": inv, "email": "", "password": PW(), "role": "guest" })
+    Json cg = client(IP())
+    await login(cg, inv, PW())
+    Json g = await api_upload(cg, "x.txt", "x", "")
+    check(res, "guest no puede subir", g["status"] == 403 and g["text"].contains("perfil"), brief(g))
+
+    # Override individual gana al rol.
+    string users_html = (await get(admin, "/admin/users"))["text"]
+    # El id del invitado es el que sigue a su nombre en la página.
+    string after_name = users_html.slice(users_html.index_of("<span class=\"muted mono\">" + inv + "</span>"))
+    string guest_id = between(after_name, "action=\"/admin/users/", "\"")
+    await post(admin, "/admin/users/" + guest_id, { "role": "guest", "is_active": "true", "is_approved": "true", "can_upload": "yes", "can_delete": "inherit", "can_share_public": "inherit", "can_share_internal": "inherit" })
+    Json cg2 = client(IP())
+    await login(cg2, inv, PW())
+    check(res, "override individual gana al rol", (await api_upload(cg2, "x.txt", "x", ""))["status"] == 201, "")
+
+    # No se puede quedar sin administradores.
+    string primero_block = users_html.slice(users_html.index_of("<span class=\"muted mono\">primero</span>"))
+    string primero_id = between(primero_block, "action=\"/admin/users/", "\"")
+    Json demote = await post(admin, "/admin/users/" + primero_id, { "role": "user", "is_active": "true", "is_approved": "true" })
+    check(res, "último admin: mensaje", demote["text"].contains("al menos un administrador"), "id=" + primero_id + " " + between(demote["text"], "<main>", "</main>").slice(0, 300))
+    check(res, "último admin: sigue siendo admin", me(admin)["role"] == "admin", "")
+
+    # Auditoría.
+    Json cau = await user_client(IP(), "auditado", PW())
+    Json n = (await api_upload(cau, "auditado.txt", "x", ""))["body"]
+    await get(cau, "/files/" + n["id"] + "/download")
+    string audit = (await get(admin, "/admin/audit"))["text"]
+    check(res, "auditoría: subida", audit.contains("<td>upload</td>"), "")
+    check(res, "auditoría: descarga", audit.contains("<td>download</td>"), "")
+    check(res, "auditoría: filtro por evento", not (await get(admin, "/admin/audit?event=download"))["text"].contains("<td>upload</td>"), "")
+
+    # Restablecer contraseña cierra sesiones.
+    string victima = uname("victima")
+    Json cv = await user_client(IP(), victima, PW())
+    string vhtml = (await get(admin, "/admin/users"))["text"]
+    string vid = between(vhtml.slice(vhtml.index_of(cv["name"])), "action=\"/admin/users/", "\"")
+    await post(admin, "/admin/users/" + vid + "/password", { "password": "OtraClave99" })
+    check(res, "reset de contraseña: cierra sus sesiones", not me(cv)["authenticated"], "")
+    Json cv2 = client(IP())
+    check(res, "reset de contraseña: entra con la nueva", await login(cv2, cv["name"], "OtraClave99"), "")
+
+    # Recalcular y eliminar.
+    Json rc = await post(admin, "/admin/users/" + vid + "/recompute", null)
+    check(res, "recalcular uso", rc["text"].contains("Uso recalculado"), brief(rc))
+    Json del_wrong = await post(admin, "/admin/users/" + vid + "/delete", { "confirm": "no" })
+    check(res, "eliminar: exige confirmar el nombre", del_wrong["text"].contains("Escribe el nombre"), brief(del_wrong))
+    Json del_ok = await post(admin, "/admin/users/" + vid + "/delete", { "confirm": cv["name"] })
+    check(res, "eliminar: borra la cuenta", del_ok["text"].contains("Usuario eliminado"), brief(del_ok))
+    check(res, "eliminar: ya no puede entrar", not await login(client(IP()), cv["name"], "OtraClave99"), "")
+    return true
+
+fn bool t_settings(Json res):
+    Json admin = await admin_client()
+    Json c = await user_client(IP(), "ajustes", PW())
+    Json node = (await api_upload(c, "algo.txt", "x", ""))["body"]
+    check(res, "ajuste: los enlaces funcionan al principio", (await post(c, "/api/files/" + node["id"] + "/links", {}))["status"] == 201, "")
+
+    # Desactivar los enlaces públicos surte efecto sin reiniciar.
+    await post(admin, "/admin/settings", { "sharing__public_links_enabled": "" })
+    check(res, "ajuste en caliente: enlaces desactivados", (await post(c, "/api/files/" + node["id"] + "/links", {}))["status"] == 403, "")
+    Json st = await get(admin, "/admin/settings")
+    check(res, "ajuste: la página marca lo sobrescrito", st["text"].contains("title=\"Sobrescrito desde el panel\""), "")
+
+    # Un valor inválido se rechaza y la instancia sigue funcionando.
+    Json bad = await post(admin, "/admin/settings", { "network__trusted_mode": "modo-inventado", "sharing__public_links_enabled": "on" })
+    check(res, "ajuste inválido: se avisa", bad["text"].contains("valor no admitido"), brief(bad))
+    check(res, "ajuste inválido: la instancia sigue", me(admin)["authenticated"], "")
+    check(res, "ajuste: se reactivó lo válido del mismo envío", (await post(c, "/api/files/" + node["id"] + "/links", {}))["status"] == 201, "")
+
+    # Volver al valor del fichero. Como un envío con casillas sin marcar las
+    # apaga todas, se restablecen todos los ajustes sobrescritos para no
+    # contaminar el resto de pruebas del escenario.
+    int resets = 0
+    for int pass in range(3):
+        string html = (await get(admin, "/admin/settings"))["text"]
+        if not html.contains("title=\"Sobrescrito desde el panel\">●"):
+            break
+        string rest = html
+        while rest.contains("title=\"Sobrescrito desde el panel\">●</span>"):
+            string tail = rest.slice(rest.index_of("title=\"Sobrescrito desde el panel\">●</span>"))
+            string key = between(tail, "<span class=\"mono muted\">", "</span>")
+            await post(admin, "/admin/settings/reset", { "key": key })
+            resets = resets + 1
+            rest = tail.slice(30)
+    check(res, "ajuste: reset de lo sobrescrito", resets > 0 and not (await get(admin, "/admin/settings"))["text"].contains("title=\"Sobrescrito desde el panel\">●"), "restablecidos: " + str(resets))
+    Json nr = await register(client(IP()), uname("trasajustes"), PW())
+    check(res, "ajuste: el registro vuelve a estar abierto", nr["status"] == 200, brief(nr))
+    return true
+
+fn bool t_tokens(Json res):
+    Json c = await user_client(IP(), "tokens", PW())
+    Json created = await post(c, "/profile/tokens", { "name": "solo-lectura", "scopes": "read", "expires_days": "0" })
+    string token = between(created["text"], "<div class=\"token-box mono\" style=\"margin-top:8px\">", "</div>")
+    check(res, "token: se muestra una vez", len(token) >= 30, brief(created))
+    await logout(c)
+
+    Json t = client(IP())
+    t["bearer"] = token
+    check(res, "token: identifica al usuario", (await get(t, "/api/me"))["body"]["username"] == c["name"], "")
+    check(res, "token: lectura permitida", (await get(t, "/api/files"))["status"] == 200, "")
+    check(res, "token: escritura denegada", (await api_upload(t, "x.txt", "x", ""))["status"] == 403, "")
+
+    # Revocar.
+    Json c2 = client(IP())
+    await login(c2, c["name"], PW())
+    string tid = between((await get(c2, "/profile"))["text"], "/profile/tokens/", "/revoke")
+    await post(c2, "/profile/tokens/" + tid + "/revoke", null)
+    check(res, "token: revocado ya no sirve", not (await get(t, "/api/me"))["body"]["authenticated"], "")
+
+    # Casillas repetidas: un token con varios ámbitos.
+    Json multi = await call(c2, "POST", "/profile/tokens", "name=multi&scopes=read&scopes=write&expires_days=0", { "Content-Type": "application/x-www-form-urlencoded" })
+    string mtoken = between(multi["text"], "<div class=\"token-box mono\" style=\"margin-top:8px\">", "</div>")
+    Json mt = client(IP())
+    mt["bearer"] = mtoken
+    check(res, "token: varios ámbitos permiten escribir", (await api_upload(mt, "m.txt", "x", ""))["status"] == 201, brief(multi))
+    return true
+
+# ── Segundo factor ──────────────────────────────────────────────────────────
+
+fn bool t_totp(Json res):
+    # Vector de la RFC 4226 (clave "12345678901234567890", contador 1).
+    string vec = await hotp_hex("3132333435363738393031323334353637383930", 1)
+    check(res, "HOTP: vector de la RFC 4226", vec == "287082", vec)
+
+    Json c = await user_client(IP(), "doblef", PW())
+    Json setup = await get(c, "/2fa/setup")
+    string secret = between(setup["text"], "<div class=\"token-box mono\">", "</div>")
+    check(res, "2FA: la página da el secreto", len(secret) == 32, brief(setup))
+    check(res, "2FA: un código erróneo no activa", (await post(c, "/2fa/setup", { "code": "000000" }))["status"] == 400, "")
+    await post(c, "/2fa/setup", { "code": await totp_now(secret) })
+    check(res, "2FA: se activa con un código válido", (await get(c, "/profile"))["text"].contains("Activo."), "")
+
+    await logout(c)
+    Json c2 = client(IP())
+    Json l = await post(c2, "/login", { "username": c["name"], "password": PW(), "next": "/" })
+    Json pend = await get(c2, "/2fa")
+    check(res, "2FA: el login pide el código", c2["cookies"].has("drive_session") and pend["text"].contains("Segundo factor"), brief(pend))
+    check(res, "2FA: sin el código no se está autenticado", not me(c2)["authenticated"], "")
+    Json wrong = await post(c2, "/2fa", { "code": "000000", "next": "/" })
+    check(res, "2FA: un código erróneo -> 401", wrong["status"] == 401, brief(wrong))
+    await post(c2, "/2fa", { "code": await totp_now(secret), "next": "/" })
+    check(res, "2FA: el código correcto abre la sesión", me(c2)["authenticated"], "")
+
+    # Desactivar pide la contraseña.
+    check(res, "2FA: desactivar con contraseña incorrecta", (await post(c2, "/2fa/disable", { "password": "mala" }))["text"].contains("incorrecta"), "")
+    await post(c2, "/2fa/disable", { "password": PW() })
+    check(res, "2FA: desactivado", (await get(c2, "/profile"))["text"].contains("No está activo"), "")
+    return true
+
+# ── Páginas ─────────────────────────────────────────────────────────────────
+
+fn bool t_pages(Json res):
+    Json c = await user_client(IP(), "poblada", PW())
+    Json carpeta = (await post(c, "/api/folders", { "name": "Proyecto" }))["body"]
+    Json fichero = (await api_upload(c, "memoria.txt", "contenido", carpeta["id"]))["body"]
+    if not check(res, "pages: preparación", fichero.has("id") and carpeta.has("id"), str(carpeta) + " / " + str(fichero)):
+        return false
+    Json borrado = (await api_upload(c, "descartado.txt", "basura", ""))["body"]
+    await call(c, "DELETE", "/api/files/" + borrado["id"], null, {})
+    await upload_file(c, "/api/files", "file", "memoria.txt", "contenido revisado", { "parent_id": carpeta["id"], "overwrite": "true" })
+    Json link = (await post(c, "/api/files/" + fichero["id"] + "/links", {}))["body"]
+    Json colega = await user_client(IP(), "colega", PW())
+    await post(c, "/api/files/" + fichero["id"] + "/shares", { "username": colega["name"] })
+    await call(c, "PATCH", "/api/files/" + carpeta["id"], { "is_public": "true" }, {})
+    string token = link["url"].split("/")[len(link["url"].split("/")) - 1]
+
+    Json admin = await admin_client()
+    for string path in ["/files", "/shared", "/trash", "/links", "/profile", "/search?q=memoria", "/browse", "/2fa/setup"]:
+        Json r = await get(c, path)
+        check(res, "página " + path, r["status"] == 200 and r["text"].contains("<html"), brief(r))
+    for string path in ["/admin", "/admin/users", "/admin/settings", "/admin/audit"]:
+        Json r = await get(admin, path)
+        check(res, "página " + path, r["status"] == 200 and r["text"].contains("<html"), brief(r))
+    for string path in ["/files/" + carpeta["id"], "/files/" + fichero["id"] + "/detail", "/files/" + carpeta["id"] + "/detail"]:
+        Json r = await get(c, path)
+        check(res, "página " + path, r["status"] == 200, brief(r))
+    Json r2 = await get(colega, "/shared")
+    check(res, "página /shared del colega lista lo compartido", r2["text"].contains("memoria.txt"), brief(r2))
+
+    Json anon = client(IP())
+    for string path in ["/login", "/register", "/browse", "/s/" + token]:
+        Json r = await get(anon, path)
+        check(res, "página sin cuenta " + path, r["status"] == 200, brief(r))
+    check(res, "carpeta pública", (await get(anon, "/browse?node_id=" + carpeta["id"]))["status"] == 200, "")
+    check(res, "lo que cuelga de una carpeta pública hereda su visibilidad", (await get(anon, "/p/" + fichero["id"]))["status"] == 200, "")
+
+    # Página de error y estado.
+    Json nf = await get(c, "/files/noexiste/detail")
+    check(res, "página de error", nf["status"] == 404 and nf["text"].contains("Error 404"), brief(nf))
+    Json api_nf = await get(c, "/api/files/noexiste")
+    check(res, "error de API en JSON", api_nf["status"] == 404 and api_nf["body"]["detail"] == "No existe ese elemento.", brief(api_nf))
+    check(res, "ruta inexistente", (await get(anon, "/no/existe"))["status"] == 404, "")
+    check(res, "healthz", (await get(anon, "/healthz"))["body"]["status"] == "ok", "")
+    check(res, "documentación de la API", (await get(anon, "/openapi.json"))["status"] == 200, "")
+    return true
+
+# ── Mantenimiento y órdenes de consola ──────────────────────────────────────
+
+fn bool t_maintenance(Json res):
+    Json c = await user_client(IP(), "efimero", PW())
+    Json n = (await api_upload(c, "efimero.txt", "contenido efimero " + hash.uuid(), ""))["body"]
+    await call(c, "DELETE", "/api/files/" + n["id"] + "?permanent=true", null, {})
+
+    Json run = await cli(["maintenance"])
+    check(res, "mantenimiento: libera blobs huérfanos", run["status"] == 0 and not run["stdout"].contains("blobs=0"), str(run))
+
+    Json ls = await cli(["listusers"])
+    check(res, "consola: listusers", ls["status"] == 0 and ls["stdout"].contains("primero"), str(ls))
+    Json chk = await cli(["check"])
+    check(res, "consola: check", chk["stdout"].contains("Instancia:"), str(chk))
+    Json unknown = await cli(["noexiste"])
+    check(res, "consola: orden desconocida -> 2", unknown["status"] == 2, str(unknown))
+
+    string cu = uname("consola")
+    Json mk = await cli(["createuser", cu, "--role", "user", "--password", PW()])
+    check(res, "consola: createuser", mk["status"] == 0, str(mk))
+    check(res, "consola: el usuario creado entra", await login(client(IP()), cu, PW()), "")
+    Json dup = await cli(["createuser", cu, "--password", PW()])
+    check(res, "consola: createuser repetido falla", dup["status"] == 1, str(dup))
+    Json pw = await cli(["passwd", cu, "--password", "ClaveNueva77"])
+    check(res, "consola: passwd", pw["status"] == 0 and await login(client(IP()), cu, "ClaveNueva77"), str(pw))
+    Json weak = await cli(["passwd", cu, "--password", "abc"])
+    check(res, "consola: passwd respeta la política", weak["status"] == 1, str(weak))
+    Json rc = await cli(["recompute"])
+    check(res, "consola: recompute", rc["status"] == 0 and rc["stdout"].contains(cu), str(rc))
+    return true
+
+get endpoint("/run/default"):
+    Json res = new_results("default")
+    try:
+        await t_auth(res)
+    catch e:
+        check(res, "t_auth", false, e.message)
+    try:
+        await t_files(res)
+    catch e:
+        check(res, "t_files", false, e.message)
+    try:
+        await t_files_ui(res)
+    catch e:
+        check(res, "t_files_ui", false, e.message)
+    try:
+        await t_sharing(res)
+    catch e:
+        check(res, "t_sharing", false, e.message)
+    try:
+        await t_links_ui(res)
+    catch e:
+        check(res, "t_links_ui", false, e.message)
+    try:
+        await t_admin(res)
+    catch e:
+        check(res, "t_admin", false, e.message)
+    try:
+        await t_settings(res)
+    catch e:
+        check(res, "t_settings", false, e.message)
+    try:
+        await t_tokens(res)
+    catch e:
+        check(res, "t_tokens", false, e.message)
+    try:
+        await t_totp(res)
+    catch e:
+        check(res, "t_totp", false, e.message)
+    try:
+        await t_pages(res)
+    catch e:
+        check(res, "t_pages", false, e.message)
+    try:
+        await t_maintenance(res)
+    catch e:
+        check(res, "t_maintenance", false, e.message)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)

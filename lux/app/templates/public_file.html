@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ c["node"]["name"] }} · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="auth-page" style="max-width:560px">
+  <div class="card">
+    <h1>{{ c["node"]["icon"] }} {{ c["node"]["name"] }}</h1>
+    <p class="muted">{{ c["node"]["size_h"] }} · {{ c["type_text"] }}</p>
+
+    {% if c["node"]["is_image"] %}
+      <p><img class="preview-box" src="/p/{{ c["node"]["id"] }}/download" alt="{{ c["node"]["name"] }}"></p>
+    {% endif %}
+
+    <p class="row">
+      <a class="button primary" href="/p/{{ c["node"]["id"] }}/download">Descargar</a>
+      <a class="button" href="/browse">Ver más contenido</a>
+    </p>
+    <p class="muted">{{ c["availability"] }}</p>
+  </div>
+</div>
+{% endblock %}

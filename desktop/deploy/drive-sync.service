@@ -1,0 +1,38 @@
+[Unit]
+Description=Drive Sync — sincronización de carpetas con Drive
+# Sin esperar a que nadie inicie sesión: al arrancar el equipo se pone al día sola.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# Corre como el usuario dueño de las carpetas sincronizadas (install.sh lo rellena):
+# los ficheros que baja quedan a su nombre y con sus permisos.
+User=@USER@
+WorkingDirectory=/opt/drive-sync
+Environment=DRIVE_SYNC_HOME=/var/lib/drive-sync
+Environment=DRIVE_SYNC_DB=/var/lib/drive-sync/state.db
+Environment=DRIVE_SYNC_PORT=7878
+ExecStart=/opt/drive-sync/lux --no-watch /opt/drive-sync/daemon
+Restart=on-failure
+RestartSec=5
+# La base guarda el token de Drive y el secreto de la API local: sólo el usuario.
+UMask=0077
+StateDirectory=drive-sync
+StateDirectoryMode=0700
+
+# --- Endurecimiento -------------------------------------------------------
+# El sistema, en sólo lectura salvo donde se sincronizan carpetas. Si enlazas una
+# carpeta fuera de estas rutas, añádela a ReadWritePaths (drop-in: systemctl edit).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/drive-sync /home /mnt /media /srv
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

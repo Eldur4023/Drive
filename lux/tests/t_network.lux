@@ -1,0 +1,138 @@
+# Acceso sin login desde redes de confianza y suplantación de cabeceras
+# (test_network de la versión Python). La IP del cliente se simula con
+# X-Forwarded-For; la instancia confía en el bucle local como proxy.
+
+fn string LAN():
+    return "192.168.1.50"
+
+fn string OUT():
+    return "203.0.113.7"
+
+# Sube algo y lo marca visible para la red local. Devuelve el nodo.
+fn Json publish_lan(string ip, string name, string content):
+    Json c = client(ip)
+    string user = "ana"
+    await register(c, user, "Contrasena1")
+    await login(c, user, "Contrasena1")
+    Json node = (await api_upload(c, name, content, ""))["body"]
+    await call(c, "PATCH", "/api/files/" + node["id"], { "lan_visible": "true" }, {})
+    await logout(c)
+    return node
+
+fn bool t_net_none(Json res):
+    Json c = client(LAN())
+    Json node = await publish_lan(LAN(), "compartido-lan.txt", "lan")
+    check(res, "modo none pide login siempre", (await get(c, "/p/" + node["id"]))["status"] == 404, "")
+    return true
+
+fn bool t_net_readonly(Json res):
+    Json node = await publish_lan(LAN(), "compartido-lan.txt", "lan")
+    Json c = client(LAN())
+    check(res, "modo readonly: la página se ve sin cuenta", (await get(c, "/p/" + node["id"]))["status"] == 200, "")
+    check(res, "modo readonly: se descarga", (await get(c, "/p/" + node["id"] + "/download"))["text"] == "lan", "")
+    Json me = (await get(c, "/api/me"))["body"]
+    check(res, "modo readonly: estado de la red", not me["authenticated"] and me["trusted_network"] and me["readonly"], str(me))
+    check(res, "modo readonly: aparece en /browse", (await get(c, "/browse"))["text"].contains("compartido-lan.txt"), "")
+
+    # Desde fuera de la LAN no se ve.
+    Json out = client(OUT())
+    check(res, "fuera de la LAN: no se ve", (await get(out, "/p/" + node["id"]))["status"] == 404, "")
+    check(res, "fuera de la LAN: la red no es de confianza", not (await get(out, "/api/me"))["body"]["trusted_network"], "")
+
+    # Estar en la red no da acceso a lo que nadie ha abierto.
+    Json a = client(LAN())
+    await login(a, "ana", "Contrasena1")
+    Json privado = (await api_upload(a, "privado.txt", "no compartido", ""))["body"]
+    await logout(a)
+    check(res, "lo privado no se expone a la LAN", (await get(c, "/p/" + privado["id"]))["status"] == 404, "")
+
+    # En readonly no se sube aunque haya sesión de red.
+    Json up = await api_upload(c, "x.txt", "x", "")
+    check(res, "modo readonly: sin sesión no se sube", up["status"] == 401, brief(up))
+    return true
+
+fn bool t_net_full_a(Json res):
+    Json c = client(LAN())
+    await register(c, "ana", "Contrasena1")
+    await login(c, "ana", "Contrasena1")
+    Json node = (await api_upload(c, "mio.txt", "contenido de ana", ""))["body"]
+    await logout(c)
+
+    Json estado = (await get(c, "/api/me"))["body"]
+    check(res, "modo full: sesión automática", estado["authenticated"] and estado["username"] == "ana" and estado["kind"] == "network", str(estado))
+    check(res, "modo full: descarga lo suyo", (await get(c, "/files/" + node["id"] + "/download"))["text"] == "contenido de ana", "")
+    # Desde fuera no hay sesión automática.
+    check(res, "modo full: fuera de la LAN no hay sesión", not (await get(client(OUT()), "/api/me"))["body"]["authenticated"], "")
+    # Subir sí se permite (require_login_for sólo reserva admin y ajustes).
+    check(res, "modo full: subir permitido", (await api_upload(c, "nuevo.txt", "x", ""))["status"] == 201, "")
+    check(res, "modo full: el panel de admin exige login real", (await get(c, "/admin"))["status"] != 200, "")
+    return true
+
+fn bool t_net_full_b(Json res):
+    Json c = client(LAN())
+    await register(c, "ana", "Contrasena1")
+    await logout(c)
+    # Puede leer, pero subir exige identificarse de verdad.
+    check(res, "modo full+require_login: autenticada por red", (await get(c, "/api/me"))["body"]["authenticated"], "")
+    Json r = await api_upload(c, "x.txt", "x", "")
+    check(res, "modo full+require_login: subir -> 403", r["status"] == 403 and str(r["body"]["detail"]).contains("iniciar sesión"), brief(r))
+    return true
+
+fn bool t_net_forged(Json res):
+    Json node = await publish_lan(OUT(), "compartido-lan.txt", "lan")
+    # Sin proxy declarado, la cabecera no puede falsear la red.
+    Json c = client(OUT())
+    c["ip"] = LAN()
+    check(res, "X-Forwarded-For ajeno no se acepta sin proxy declarado", (await get(c, "/p/" + node["id"]))["status"] == 404, "")
+    return true
+
+fn bool t_net_proxy(Json res):
+    Json node = await publish_lan(OUT(), "compartido-lan.txt", "lan")
+    check(res, "con el proxy declarado se acepta X-Forwarded-For", (await get(client(LAN()), "/p/" + node["id"]))["status"] == 200, "")
+    # Una cadena con clientes inventados: manda el último desconocido.
+    Json spoof = client(LAN())
+    Json r = await call(spoof, "GET", "/p/" + node["id"], null, { "X-Forwarded-For": "192.168.1.9, 203.0.113.7" })
+    check(res, "cadena X-Forwarded-For: manda el último salto desconocido", r["status"] == 404, brief(r))
+    return true
+
+fn bool t_net_denied(Json res):
+    check(res, "redes denegadas: /browse -> 403", (await get(client(LAN()), "/browse"))["status"] == 403, "")
+    check(res, "redes denegadas: la API también", (await get(client(LAN()), "/api/me"))["status"] == 403, "")
+    check(res, "redes denegadas: desde fuera sí", (await get(client(OUT()), "/browse"))["status"] == 200, "")
+    check(res, "redes denegadas: /healthz sigue abierto", (await get(client(LAN()), "/healthz"))["status"] == 200, "")
+    return true
+
+get endpoint("/run/net_none"):
+    Json res = new_results("net_none")
+    await t_net_none(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/net_readonly"):
+    Json res = new_results("net_readonly")
+    await t_net_readonly(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/net_full_a"):
+    Json res = new_results("net_full_a")
+    await t_net_full_a(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/net_full_b"):
+    Json res = new_results("net_full_b")
+    await t_net_full_b(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/net_forged"):
+    Json res = new_results("net_forged")
+    await t_net_forged(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/net_proxy"):
+    Json res = new_results("net_proxy")
+    await t_net_proxy(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)
+
+get endpoint("/run/net_denied"):
+    Json res = new_results("net_denied")
+    await t_net_denied(res)
+    return text(summary(res)).status(res["fail"] == 0 ? 200 : 500)

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Ajustes · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+{% include "admin_nav.html" %}
+
+<div class="notice">
+  Lo que guardes aquí se almacena en la base de datos y tiene prioridad sobre
+  <span class="mono">config.json</span>, pero las variables de entorno siguen
+  ganando a ambos. Los ajustes marcados con ● están sobrescritos desde este panel.
+</div>
+
+<form method="post" action="/admin/settings">
+  {% for grp in c["groups"] %}
+  <div class="card">
+    <h2>{{ grp["name"] }}</h2>
+    {% for s in grp["settings"] %}
+      <div class="field">
+        <label for="{{ s["field"] }}">
+          {{ s["label"] }}
+          {% if s["overridden"] %}<span title="Sobrescrito desde el panel">●</span>{% endif %}
+          <span class="mono muted">{{ s["key"] }}</span>
+        </label>
+
+        {% if s["kind"] == "bool" %}
+          <input type="checkbox" id="{{ s["field"] }}" name="{{ s["field"] }}" value="true"
+                 {% if s["value"] == "true" %}checked{% endif %}>
+        {% elif s["kind"] == "choice" %}
+          <select id="{{ s["field"] }}" name="{{ s["field"] }}">
+            {% for option in s["options"] %}
+              <option value="{{ option }}" {% if s["value"] == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        {% elif s["kind"] == "int" %}
+          <input type="number" id="{{ s["field"] }}" name="{{ s["field"] }}" value="{{ s["value"] }}">
+        {% else %}
+          <input id="{{ s["field"] }}" name="{{ s["field"] }}" value="{{ s["value"] }}" style="width:100%">
+        {% endif %}
+
+        {% if s["help"] != "" %}<p class="muted">{{ s["help"] }}</p>{% endif %}
+      </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <button class="primary" type="submit">Guardar ajustes</button>
+  </div>
+</form>
+
+<div class="card">
+  <h2>Volver un ajuste a config.json</h2>
+  <form method="post" action="/admin/settings/reset" class="row">
+    <input name="key" placeholder="p. ej. network.trusted_mode" required style="min-width:280px">
+    <button type="submit">Restablecer</button>
+  </form>
+
+  <h3>Sólo editables en el fichero o por entorno</h3>
+  <p class="muted mono">{{ c["locked"] }}</p>
+</div>
+{% endblock %}

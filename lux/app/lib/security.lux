@@ -1,0 +1,96 @@
+# Contraseñas, tokens y segundo factor.
+
+# ── Contraseñas ─────────────────────────────────────────────────────────────
+
+# Argon2id (o bcrypt/PBKDF2 según security.password_hash).
+fn string hash_password(string password, Json cf):
+    switch cf["security.password_hash"]:
+        case "bcrypt":
+            return await hash.bcrypt(password)
+        case "pbkdf2":
+            return await hash.password(password)
+        else:
+            return await hash.argon2(password)
+
+# Comprueba una contraseña contra cualquiera de los formatos soportados; el
+# formato se deduce del propio hash (también valen los de otros sistemas).
+fn bool verify_password(string password, Json stored):
+    if stored == null or stored == "":
+        return false
+    return await hash.verify(password, stored)
+
+# ¿Conviene regenerar el hash en el próximo login?
+fn bool needs_rehash(string stored, Json cf):
+    switch cf["security.password_hash"]:
+        case "bcrypt":
+            return not stored.starts_with("$2")
+        case "pbkdf2":
+            return not stored.starts_with("pbkdf2_sha256$600000$")
+        else:
+            return not stored.starts_with("$argon2id$")
+
+# Incumplimientos de la política; lista vacía si la contraseña vale.
+fn List<string> check_password_policy(string password, Json username, Json email, Json cf):
+    List<string> errors = []
+    int min_length = cf["security.password_policy.min_length"]
+    if len(password) < min_length:
+        errors.add("Debe tener al menos " + str(min_length) + " caracteres.")
+    if cf["security.password_policy.require_uppercase"] and password.lower() == password:
+        errors.add("Debe incluir al menos una mayúscula.")
+    if cf["security.password_policy.require_lowercase"] and password.upper() == password:
+        errors.add("Debe incluir al menos una minúscula.")
+    if cf["security.password_policy.require_digit"] and not regex.test("[0-9]", password):
+        errors.add("Debe incluir al menos un dígito.")
+    if cf["security.password_policy.require_symbol"] and not regex.test("[^A-Za-z0-9]", password):
+        errors.add("Debe incluir al menos un símbolo.")
+
+    if cf["security.password_policy.reject_username_in_password"]:
+        string lowered = password.lower()
+        if username != null and len(username) >= 3 and lowered.contains(str(username).lower()):
+            errors.add("No puede contener el nombre de usuario.")
+        if email != null and email != "":
+            string local = str(email).split("@")[0]
+            if len(local) >= 3 and lowered.contains(local.lower()):
+                errors.add("No puede contener la dirección de correo.")
+    return errors
+
+# ── Tokens ──────────────────────────────────────────────────────────────────
+
+# Token urlsafe de exactamente `length` caracteres (mínimo 16).
+fn string generate_token(int length):
+    int n = length < 16 ? 16 : length
+    return hash.token(n).slice(0, n)
+
+# Los tokens se guardan hasheados: una copia de la base de datos no da acceso.
+fn string hash_token(string token):
+    return hash.sha256(token)
+
+# ── Segundo factor (TOTP, RFC 6238) ─────────────────────────────────────────
+
+fn string new_totp_secret():
+    return otp.new_secret()
+
+# Valida un código admitiendo un paso de desfase de reloj.
+fn bool verify_totp(Json secret, string code):
+    if secret == null or secret == "" or code == "":
+        return false
+    return otp.verify(str(secret), code.trim().replace(" ", ""))
+
+fn string totp_uri(string secret, string username, Json cf):
+    return otp.uri(secret, username, str(cf["security.totp.issuer"]))
+
+# QR como SVG embebible, o "" si no hay generador. Lux no trae módulo de QR:
+# se usa la orden qrencode si está instalada (ver needed.md).
+fn string qr_svg(string data):
+    try:
+        Json r = await os.run("qrencode", ["-t", "SVG", "-s", "4", "-m", "1", "-o", "-", data], { "timeout_ms": 5000 })
+        if r["status"] != 0:
+            return ""
+        string svg = r["stdout"]
+        int at = svg.index_of("<svg")
+        return at < 0 ? "" : svg.slice(at)
+    catch e:
+        return ""
+
+fn bool totp_required(string role, Json cf):
+    return cf["security.totp.enabled"] and in_list(role, cf["security.totp.required_for_roles"])

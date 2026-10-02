@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Drive Sync</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.9 9.6 4.2 4.2 0 0 1 17.5 18z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-sync" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-3M4 5v4h4M4 13a8 8 0 0 0 14.9 3M20 19v-4h-4"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></symbol>
+  <symbol id="i-arrows" viewBox="0 0 24 24"><path d="M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <div class="brand"><span class="logo"><svg class="ico"><use href="#i-cloud"/></svg></span><b>Drive Sync</b></div>
+  <div id="conn" class="conn"></div>
+  <div class="actions">
+    <button id="btn-sync" class="ghost" title="Sincronizar ahora"><svg class="ico"><use href="#i-sync"/></svg>Sincronizar</button>
+    <button id="btn-settings" class="ghost" title="Servidor y token"><svg class="ico"><use href="#i-gear"/></svg>Ajustes</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner" hidden></div>
+
+  <section id="onboarding" class="card" hidden>
+    <h1>Conecta con tu Drive</h1>
+    <p class="muted">En la web de Drive, abre <b>Perfil → Tokens de API</b>, crea uno con los ámbitos <b>read</b> y <b>write</b> y pégalo aquí.</p>
+    <form id="form-settings">
+      <div class="field"><label for="server_url">Dirección de Drive</label>
+        <input id="server_url" placeholder="http://192.168.1.20:7777" autocomplete="off" required></div>
+      <div class="field"><label for="token">Token de API</label>
+        <input id="token" type="password" autocomplete="off" required></div>
+      <p id="settings-error" class="error" hidden></p>
+      <div class="row"><button class="primary" type="submit">Conectar</button><button type="button" id="settings-cancel" class="ghost" hidden>Cancelar</button></div>
+    </form>
+  </section>
+
+  <section id="links-section" hidden>
+    <div class="head">
+      <h1>Carpetas sincronizadas</h1>
+      <button id="btn-add" class="primary"><svg class="ico"><use href="#i-plus"/></svg>Añadir carpeta</button>
+    </div>
+    <div id="links"></div>
+    <div id="empty" class="empty" hidden>
+      <svg class="ico big"><use href="#i-folder"/></svg>
+      <p><b>Aún no hay ninguna carpeta.</b></p>
+      <p class="muted">Enlaza una carpeta de este equipo con una de Drive: los cambios se aplican en los dos sentidos, y al arrancar el equipo se pone al día sola.</p>
+    </div>
+    <h2>Actividad</h2>
+    <ul id="events" class="events"></ul>
+  </section>
+</main>
+
+<!-- Añadir carpeta -->
+<dialog id="dlg-add" class="modal wide">
+  <h2>Enlazar una carpeta</h2>
+  <div class="step"><span class="num">1</span><div class="grow">
+    <label>Carpeta de este equipo</label>
+    <div class="row"><button id="pick-local" type="button"><svg class="ico"><use href="#i-folder"/></svg>Elegir carpeta…</button>
+      <span id="local-path" class="path muted">ninguna elegida</span></div>
+  </div></div>
+  <div class="step"><span class="num">2</span><div class="grow">
+    <label>Dónde guardarla en Drive</label>
+    <nav id="crumbs" class="crumbs"></nav>
+    <ul id="folders" class="folders"></ul>
+    <div class="row between">
+      <button id="new-remote" type="button" class="ghost small"><svg class="ico"><use href="#i-plus"/></svg>Nueva carpeta aquí</button>
+      <label class="check"><input type="checkbox" id="make-subfolder" checked> Crear dentro una carpeta con el nombre de la local</label>
+    </div>
+  </div></div>
+  <p id="add-error" class="error" hidden></p>
+  <div class="actions-end"><button id="add-cancel" type="button">Cancelar</button><button id="add-ok" type="button" class="primary" disabled>Enlazar</button></div>
+</dialog>
+
+<!-- Confirmación y petición de texto genéricas -->
+<dialog id="dlg-confirm" class="modal">
+  <h3 id="confirm-title"></h3><p id="confirm-text" class="muted"></p>
+  <div class="actions-end"><button id="confirm-no">Cancelar</button><button id="confirm-yes" class="danger-solid">Quitar</button></div>
+</dialog>
+<dialog id="dlg-prompt" class="modal">
+  <h3 id="prompt-title"></h3>
+  <input id="prompt-input" maxlength="200" autocomplete="off">
+  <div class="actions-end"><button id="prompt-no">Cancelar</button><button id="prompt-yes" class="primary">Crear</button></div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

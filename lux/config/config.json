@@ -1,0 +1,183 @@
+{
+  "app": {
+    "name": "Drive",
+    "base_url": "http://localhost:8000",
+    "language": "es",
+    "timezone": "Europe/Madrid"
+  },
+
+  "server": {
+    "behind_proxy": true,
+    "trusted_proxies": ["127.0.0.1/32", "::1/128"]
+  },
+
+  "storage": {
+    "root": "./data/blobs",
+    "max_upload_size": "2GB",
+    "default_quota": "10GB",
+    "deduplicate": true,
+    "hash_algorithm": "sha256",
+    "blocked_extensions": [".exe", ".scr"],
+    "allowed_extensions": [],
+    "blocked_mime_types": []
+  },
+
+  "trash": {
+    "enabled": true,
+    "retention": "30d",
+    "counts_against_quota": true
+  },
+
+  "versions": {
+    "enabled": true,
+    "max_per_file": 10,
+    "retention": "90d"
+  },
+
+  "thumbnails": {
+    "enabled": true,
+    "sizes": [128, 512],
+    "max_source_size": "25MB"
+  },
+
+  "auth": {
+    "registration_enabled": false,
+    "allowed_email_domains": [],
+    "require_admin_approval": true,
+    "default_role": "user",
+    "allow_email_login": true
+  },
+
+  "security": {
+    "secret_key": "CAMBIAME-EN-PRODUCCION",
+    "password_hash": "argon2",
+    "password_policy": {
+      "min_length": 10,
+      "require_uppercase": true,
+      "require_lowercase": true,
+      "require_digit": true,
+      "require_symbol": false,
+      "reject_username_in_password": true
+    },
+    "session": {
+      "lifetime": "7d",
+      "absolute_lifetime": "30d",
+      "cookie_name": "drive_session",
+      "cookie_secure": false,
+      "cookie_samesite": "lax",
+      "revoke_on_password_change": true
+    },
+    "lockout": {
+      "enabled": true,
+      "max_attempts": 5,
+      "window": "15m",
+      "duration": "30m",
+      "track_by_ip": true
+    },
+    "totp": {
+      "enabled": true,
+      "required_for_roles": ["admin"],
+      "issuer": "Drive"
+    }
+  },
+
+  "rate_limit": {
+    "enabled": true,
+    "login": { "requests": 10, "window": "5m" },
+    "signup": { "requests": 5, "window": "1h" },
+    "api": { "requests": 600, "window": "1m" },
+    "download": { "requests": 300, "window": "1m" },
+    "exempt_networks": ["127.0.0.1/32"]
+  },
+
+  "network": {
+    "trusted_networks": ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
+    "trusted_mode": "readonly",
+    "trusted_user": null,
+    "trusted_scope": "shared",
+    "require_login_for": ["upload", "delete", "share", "admin", "settings"],
+    "allow_session_ip_change": true,
+    "denied_networks": []
+  },
+
+  "sharing": {
+    "internal_enabled": true,
+    "public_links_enabled": true,
+    "public_links_roles": ["admin", "user"],
+    "require_password_on_public_links": false,
+    "default_link_expiry": "30d",
+    "max_link_expiry": "365d",
+    "allow_upload_links": true,
+    "allow_reshare": false,
+    "token_length": 22,
+    "default_download_limit": null
+  },
+
+  "roles": {
+    "admin": {
+      "quota": null,
+      "max_upload_size": null,
+      "can_share_public": true,
+      "can_share_internal": true,
+      "can_upload": true,
+      "can_delete": true,
+      "can_manage_users": true,
+      "can_edit_settings": true
+    },
+    "user": {
+      "quota": "10GB",
+      "max_upload_size": "2GB",
+      "can_share_public": true,
+      "can_share_internal": true,
+      "can_upload": true,
+      "can_delete": true,
+      "can_manage_users": false,
+      "can_edit_settings": false
+    },
+    "guest": {
+      "quota": "500MB",
+      "max_upload_size": "100MB",
+      "can_share_public": false,
+      "can_share_internal": false,
+      "can_upload": false,
+      "can_delete": false,
+      "can_manage_users": false,
+      "can_edit_settings": false
+    }
+  },
+
+  "audit": {
+    "enabled": true,
+    "events": [
+      "login",
+      "login_failed",
+      "logout",
+      "upload",
+      "download",
+      "delete",
+      "share_create",
+      "share_access",
+      "user_create",
+      "settings_change"
+    ],
+    "retention": "180d",
+    "store_ip": true
+  },
+
+  "ui": {
+    "theme": "auto",
+    "items_per_page": 100,
+    "show_trusted_network_hint": true,
+    "footer_text": null
+  },
+
+  "maintenance": {
+    "enabled": true,
+    "interval": "1h",
+    "purge_trash": true,
+    "purge_versions": true,
+    "purge_sessions": true,
+    "purge_audit": true,
+    "purge_orphan_blobs": true
+  }
+}

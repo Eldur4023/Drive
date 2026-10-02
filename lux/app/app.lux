@@ -1,0 +1,46 @@
+# Drive — almacenamiento de ficheros autoalojado, escrito en Lux.
+#
+#   DRIVE_DB=./data/drive.db lux ./lux
+#
+# Todo el código vive en lib/ (servicios) y routes/ (rutas HTTP); este fichero
+# sólo declara los módulos y la configuración que Lux necesita al compilar.
+# La configuración de la aplicación en sí (config/config.json, ajustes del
+# panel y variables DRIVE_*) se resuelve en tiempo de ejecución: ver
+# lib/config.lux.
+
+import sqlite
+import hash
+import time
+import math
+import os
+import json
+import encoding
+import net
+import text
+import regex
+import image
+import otp
+
+app:
+    name      "Drive"
+    version   "1.0.0"
+    port      8000
+    # Sólo el bucle local: el TLS y la exposición los pone nginx.
+    host      env("DRIVE_HOST", "127.0.0.1")
+    max_body  env("DRIVE_MAX_BODY", "2GB")
+    templates "./templates"
+
+    headers:
+        "Content-Security-Policy" "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+
+    log:
+        level "info"
+        access false
+
+    static "/static" -> "./public"
+
+    docs
+
+    sqlite:
+        file env("DRIVE_DB")
+        pool 4

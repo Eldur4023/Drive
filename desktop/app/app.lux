@@ -1,0 +1,109 @@
+# Drive Sync — la ventana de escritorio.
+#
+# No sincroniza nada por sí misma: es el mando a distancia del servicio
+# (../daemon), que corre aparte como servicio de sistema. Esta app sólo hace dos
+# cosas que el servicio no puede: abrir los selectores nativos de carpeta y
+# mostrar el estado. Todo lo demás son llamadas a la API local del servicio, con
+# su secreto leído del fichero `api-token` (así no pasa por el navegador).
+
+import window
+import os
+import http
+import json
+
+app:
+    name   "Drive Sync"
+    # Sólo esta máquina: el runtime de escritorio se niega a arrancar si no.
+    host   "127.0.0.1"
+    max_body "1MB"
+
+    window:
+        title     "Drive Sync"
+        width     1000
+        height    720
+        resizable true
+        icon      "./icon.png"
+
+    static "/" -> "./public" spa
+
+# Dónde habla y dónde está el secreto: los mismos ajustes que usa el servicio.
+fn string daemon_url():
+    return "http://127.0.0.1:" + os.getenv("DRIVE_SYNC_PORT", "7878")
+
+fn string secret_path():
+    return os.path_join(os.getenv("DRIVE_SYNC_HOME", "/var/lib/drive-sync"), "api-token")
+
+# Llama al servicio y devuelve {status, body}. Si no contesta, lo explica.
+fn Json daemon(string method, string path, Json body):
+    try:
+        string secret = await os.read_file(secret_path())
+        Json headers = { "X-Drive-Sync-Token": secret.trim() }
+        Json r = null
+        if method == "GET":
+            r = await http.get(daemon_url() + path, headers, { "timeout_ms": 20000 })
+        else if method == "DELETE":
+            r = await http.delete(daemon_url() + path, headers, { "timeout_ms": 20000 })
+        else:
+            r = await http.post(daemon_url() + path, body, headers, { "timeout_ms": 30000 })
+        return r
+    catch e:
+        return { "status": 503, "body": { "ok": false, "error": "El servicio Drive Sync no responde. ¿Está en marcha? (systemctl status drive-sync)" } }
+
+get endpoint("/api/status"):
+    Json r = await daemon("GET", "/api/status", null)
+    return r["body"].status(r["status"])
+
+post endpoint("/api/settings", Json body):
+    Json r = await daemon("POST", "/api/settings", body)
+    return r["body"].status(r["status"])
+
+post endpoint("/api/links", Json body):
+    Json r = await daemon("POST", "/api/links", body)
+    return r["body"].status(r["status"])
+
+delete endpoint("/api/links/:id", int id):
+    Json r = await daemon("DELETE", "/api/links/" + str(id), null)
+    return r["body"].status(r["status"])
+
+post endpoint("/api/links/:id/enabled", int id, Json body):
+    Json r = await daemon("POST", "/api/links/" + str(id) + "/enabled", body)
+    return r["body"].status(r["status"])
+
+post endpoint("/api/sync"):
+    Json r = await daemon("POST", "/api/sync", {})
+    return r["body"].status(r["status"])
+
+get endpoint("/api/remote/folders"):
+    Json r = await daemon("GET", "/api/remote/folders?parent_id=" + query("parent_id", ""), null)
+    return r["body"].status(r["status"])
+
+post endpoint("/api/remote/folders", Json body):
+    Json r = await daemon("POST", "/api/remote/folders", body)
+    return r["body"].status(r["status"])
+
+get endpoint("/api/events"):
+    Json r = await daemon("GET", "/api/events", null)
+    return r["body"].status(r["status"])
+
+# Lo que sólo puede hacer una app con ventana: el selector nativo de carpetas...
+post endpoint("/api/pick-folder"):
+    string path = await window.open_folder()
+    return { "path": path }
+
+# Icono en la bandeja del sistema (clic: muestra u oculta la ventana). Lo pide la
+# propia página al cargar, cuando la ventana ya existe.
+post endpoint("/api/chrome"):
+    window.set_tray("./icon.png", "Drive Sync")
+    return status(204)
+
+# ...y abrir una carpeta en el gestor de ficheros del escritorio.
+post endpoint("/api/open", Json body):
+    string path = str(body["path"])
+    if not os.is_dir(path):
+        return { "ok": false }.status(404)
+    await os.run("xdg-open", [path], { "timeout_ms": 5000 })
+    return { "ok": true }
+
+# Una ruta de la API que no existe es un 404, no la página de inicio (spa lo tragaría).
+any endpoint("/api/*"):
+    return status(404)

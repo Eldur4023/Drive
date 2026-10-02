@@ -1,0 +1,386 @@
+# Operaciones sobre el árbol de ficheros.
+#
+# Toda mutación pasa por aquí para que cuota, versiones, papelera y contadores
+# de blobs se mantengan coherentes en un único sitio. Estas funciones no abren
+# ni cierran transacciones: lo hace la ruta que las llama (begin/commit), de
+# modo que una subida con varios pasos se confirma o se deshace entera.
+#
+# Los errores esperables (cuota, nombre no permitido...) se devuelven como
+# {"ok": false, "error": mensaje} en vez de interrumpir la petición.
+
+# ── Cuota ───────────────────────────────────────────────────────────────────
+
+# Cuota efectiva: override individual > perfil del rol > default global.
+# null = sin límite.
+fn Json quota_of(Json user, Json cf):
+    if user["quota_override"] != null:
+        return user["quota_override"] == 0 ? null : user["quota_override"]
+    Json role = role_profile(cf, user["role"])
+    if role["quota"] != null:
+        return role["quota"]
+    return cf["storage.default_quota"]
+
+fn Json max_upload_of(Json user, Json cf):
+    if user["max_upload_override"] != null:
+        return user["max_upload_override"] == 0 ? null : user["max_upload_override"]
+    Json role = role_profile(cf, user["role"])
+    if role["max_upload_size"] != null:
+        return role["max_upload_size"]
+    return cf["storage.max_upload_size"]
+
+fn Json usage_of(Json user, Json cf):
+    int used = user["storage_used"] == null ? 0 : user["storage_used"]
+    Json quota = quota_of(user, cf)
+    double percent = 0.0
+    if quota != null and quota != 0:
+        percent = math.min(100.0, math.round(used * 100.0 / quota, 1))
+    return {
+        "used": used,
+        "quota": quota,
+        "unlimited": quota == null,
+        "free": quota == null ? null : math.max(0, quota - used),
+        "percent": percent
+    }
+
+# Recalcula el espacio ocupado recorriendo los nodos del usuario.
+fn int recompute_usage(Json user, Json cf):
+    List<Json> rows = []
+    if cf["trash.counts_against_quota"]:
+        rows = await sqlite.query("select coalesce(sum(size), 0) as n from nodes where owner_id = ? and is_dir = 0", user["id"])
+    else:
+        rows = await sqlite.query("select coalesce(sum(size), 0) as n from nodes where owner_id = ? and is_dir = 0 and deleted_at is null", user["id"])
+    int total = rows[0]["n"]
+    if cf["versions.enabled"]:
+        List<Json> v = await sqlite.query("select coalesce(sum(v.size), 0) as n from node_versions v join nodes n on n.id = v.node_id where n.owner_id = ?", user["id"])
+        total = total + v[0]["n"]
+    await sqlite.exec("update users set storage_used = ? where id = ?", total, user["id"])
+    return total
+
+fn bool charge(string user_id, int delta):
+    await sqlite.exec("update users set storage_used = max(0, coalesce(storage_used, 0) + ?) where id = ?", delta, user_id)
+    return true
+
+# Motivo por el que no cabe `extra` más, o "" si cabe. Relee al usuario para ver
+# lo ya cargado en esta misma petición.
+fn string quota_error(string user_id, int extra, Json cf):
+    Json user = await get_user(user_id)
+    if user == null:
+        return ""
+    Json quota = quota_of(user, cf)
+    if quota == null:
+        return ""
+    int used = user["storage_used"] == null ? 0 : user["storage_used"]
+    if used + extra > quota:
+        return "No hay espacio suficiente: quedan " + format_size(math.max(0, quota - used)) + " de " + format_size(quota) + "."
+    return ""
+
+# ── Consulta ────────────────────────────────────────────────────────────────
+
+# Hijos vivos de una carpeta (o de la raíz si parent_id es null), carpetas
+# primero como en cualquier explorador.
+fn List<Json> children_of(string owner_id, Json parent_id, string order):
+    switch order:
+        case "size":
+            return await sqlite.query("select * from nodes where owner_id = ? and ((? is null and parent_id is null) or parent_id = ?) and deleted_at is null order by is_dir desc, size desc", owner_id, parent_id, parent_id)
+        case "modified":
+            return await sqlite.query("select * from nodes where owner_id = ? and ((? is null and parent_id is null) or parent_id = ?) and deleted_at is null order by is_dir desc, updated_at desc", owner_id, parent_id, parent_id)
+        case "created":
+            return await sqlite.query("select * from nodes where owner_id = ? and ((? is null and parent_id is null) or parent_id = ?) and deleted_at is null order by is_dir desc, created_at desc", owner_id, parent_id, parent_id)
+        else:
+            return await sqlite.query("select * from nodes where owner_id = ? and ((? is null and parent_id is null) or parent_id = ?) and deleted_at is null order by is_dir desc, name", owner_id, parent_id, parent_id)
+
+# Elementos en la papelera cuyo padre no esté también en la papelera.
+fn List<Json> trashed_of(string owner_id):
+    List<Json> rows = await sqlite.query("select * from nodes where owner_id = ? and deleted_at is not null order by deleted_at desc", owner_id)
+    List<string> ids = []
+    for Json n in rows:
+        ids.add(n["id"])
+    List<Json> out = []
+    for Json n in rows:
+        if n["trashed_from_id"] == null or not ids.contains(n["trashed_from_id"]):
+            out.add(n)
+    return out
+
+fn List<Json> search_nodes(string owner_id, string term):
+    string escaped = term.trim().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return await sqlite.query("select * from nodes where owner_id = ? and deleted_at is null and name like ? escape '\\' order by is_dir desc, name limit 200", owner_id, "%" + escaped + "%")
+
+# Nodos que otros han compartido con este usuario y siguen vigentes.
+fn List<Json> shared_with(string user_id):
+    return await sqlite.query("select n.* from shares s join nodes n on n.id = s.node_id where s.user_id = ? and n.deleted_at is null and (s.expires_at is null or s.expires_at > ?) order by n.name", user_id, time.now())
+
+# Todo lo que cuelga de un nodo, a cualquier profundidad (papelera incluida).
+fn List<Json> descendants(Json node):
+    return await sqlite.query("""
+        with recursive tree(id, depth) as (
+            select id, 1 from nodes where parent_id = ?
+            union all
+            select n.id, t.depth + 1 from nodes n join tree t on n.parent_id = t.id where t.depth < 64
+        )
+        select n.* from tree t join nodes n on n.id = t.id
+        """, node["id"])
+
+fn int folder_size(Json node):
+    int total = 0
+    for Json n in await descendants(node):
+        if n["is_dir"] != 1:
+            total = total + n["size"]
+    return total
+
+# ── Nombres ─────────────────────────────────────────────────────────────────
+
+# Devuelve `name`, o `name (2)` si ya existe un hermano vivo igual.
+fn string unique_name(string owner_id, Json parent_id, string name):
+    List<Json> rows = await sqlite.query("select name from nodes where owner_id = ? and ((? is null and parent_id is null) or parent_id = ?) and deleted_at is null", owner_id, parent_id, parent_id)
+    List<string> taken = []
+    for Json r in rows:
+        taken.add(r["name"])
+    if not taken.contains(name):
+        return name
+
+    List<string> parts = name.split(".")
+    bool has_ext = len(parts) > 1
+    string ext = has_ext ? parts[len(parts) - 1] : ""
+    string stem = has_ext ? parts.slice(0, len(parts) - 1).join(".") : name
+    Json base = regex.groups("^(.*) \\(([0-9]+)\\)$", stem)
+    if base != null:
+        stem = base[1]
+    for int index in range(2, 1000):
+        string candidate = stem + " (" + str(index) + ")" + (has_ext ? "." + ext : "")
+        if not taken.contains(candidate):
+            return candidate
+    return stem + " (" + new_id().slice(0, 6) + ")" + (has_ext ? "." + ext : "")
+
+# ── Mutaciones ──────────────────────────────────────────────────────────────
+
+fn Json create_folder(Json owner, Json parent, string raw_name):
+    string name = sanitize_name(raw_name)
+    Json parent_id = parent == null ? null : parent["id"]
+    string id = new_id()
+    long now = time.now()
+    await sqlite.exec("insert into nodes (id, owner_id, parent_id, name, is_dir, size, created_at, updated_at) values (?, ?, ?, ?, 1, 0, ?, ?)", id, owner["id"], parent_id, await unique_name(owner["id"], parent_id, name), now, now)
+    return await get_node(id)
+
+fn Json save_ok(Json node):
+    return { "ok": true, "error": "", "node": node }
+
+fn Json save_fail(string msg):
+    return { "ok": false, "error": msg, "node": null }
+
+# Conserva el contenido actual como versión antes de sobreescribirlo.
+fn bool archive_version(Json node, string owner_id, Json cf):
+    if not cf["versions.enabled"] or node["blob_hash"] == null:
+        return false
+    # La versión se queda con la referencia que tenía el nodo, así que no hace
+    # falta tocar el refcount aquí: el nodo adquiere una nueva más adelante.
+    await sqlite.exec("insert into node_versions (id, node_id, blob_hash, size, created_at, created_by) values (?, ?, ?, ?, ?, ?)", new_id(), node["id"], node["blob_hash"], node["size"], time.now(), owner_id)
+    await prune_versions(node, owner_id, cf)
+    return true
+
+fn bool prune_versions(Json node, string owner_id, Json cf):
+    List<Json> versions = await sqlite.query("select * from node_versions where node_id = ? order by created_at desc, rowid desc", node["id"])
+    long cutoff = 0
+    if cf["versions.retention"]:
+        cutoff = time.now() - cf["versions.retention"] * 1000
+    int index = 0
+    for Json v in versions:
+        bool too_many = index >= cf["versions.max_per_file"]
+        bool too_old = cutoff > 0 and v["created_at"] < cutoff
+        if too_many or too_old:
+            await release_blob(v["blob_hash"], cf)
+            await charge(owner_id, 0 - v["size"])
+            await sqlite.exec("delete from node_versions where id = ?", v["id"])
+        index = index + 1
+    return true
+
+# Guarda un fichero subido, versionando si ya existía uno con ese nombre.
+fn Json save_upload(Json owner_in, Json parent, string raw_name, File f, bool overwrite, Json cf):
+    string filename = sanitize_name(raw_name)
+    string bad = check_filename(filename, cf)
+    if bad != "":
+        return save_fail(bad)
+
+    Json owner = await get_user(owner_in["id"])
+    Json parent_id = parent == null ? null : parent["id"]
+    Json existing = first(await sqlite.query("select * from nodes where owner_id = ? and ((? is null and parent_id is null) or parent_id = ?) and name = ? and deleted_at is null and is_dir = 0", owner["id"], parent_id, parent_id, filename))
+
+    Json stored = await store_upload(f, cf, max_upload_of(owner, cf))
+    if not stored["ok"]:
+        return save_fail(stored["error"])
+
+    # El coste para la cuota es el tamaño nuevo menos el que se reemplaza, y
+    # sólo si la versión antigua no se conserva.
+    int replaced = 0
+    if existing != null and overwrite and not cf["versions.enabled"]:
+        replaced = existing["size"]
+    string quota_problem = await quota_error(owner["id"], stored["size"] - replaced, cf)
+    if quota_problem != "":
+        # El blob puede haber quedado escrito sin dueño; si acabamos de crearlo
+        # y nadie lo referencia, se borra ya.
+        if stored["created"] and len(await sqlite.query("select hash from blobs where hash = ?", stored["hash"])) == 0:
+            remove_blob_files(stored["hash"], cf)
+        return save_fail(quota_problem)
+
+    await acquire_blob(stored["hash"], stored["size"])
+    long now = time.now()
+    string mime = guess_mime(filename)
+
+    if existing != null and overwrite:
+        await archive_version(existing, owner["id"], cf)
+        if not cf["versions.enabled"]:
+            await release_blob(existing["blob_hash"], cf)
+            await charge(owner["id"], 0 - existing["size"])
+        await sqlite.exec("update nodes set blob_hash = ?, size = ?, mime_type = ?, updated_at = ? where id = ?", stored["hash"], stored["size"], mime, now, existing["id"])
+        await charge(owner["id"], stored["size"])
+        return save_ok(await get_node(existing["id"]))
+
+    string id = new_id()
+    await sqlite.exec("insert into nodes (id, owner_id, parent_id, name, is_dir, blob_hash, size, mime_type, created_at, updated_at) values (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)", id, owner["id"], parent_id, await unique_name(owner["id"], parent_id, filename), stored["hash"], stored["size"], mime, now, now)
+    await charge(owner["id"], stored["size"])
+    return save_ok(await get_node(id))
+
+# Vuelve a una versión anterior, archivando la actual.
+fn bool restore_version(Json node, Json version, string owner_id, Json cf):
+    await archive_version(node, owner_id, cf)
+    await sqlite.exec("update nodes set blob_hash = ?, size = ?, updated_at = ? where id = ?", version["blob_hash"], version["size"], time.now(), node["id"])
+    await sqlite.exec("delete from node_versions where id = ?", version["id"])
+    return true
+
+# Renombra. {"ok", "error"}.
+fn Json rename_node(Json node, string raw_name, Json cf):
+    string name = sanitize_name(raw_name)
+    if node["is_dir"] != 1:
+        string bad = check_filename(name, cf)
+        if bad != "":
+            return { "ok": false, "error": bad }
+    string unique = await unique_name(node["owner_id"], node["parent_id"], name)
+    await sqlite.exec("update nodes set name = ?, updated_at = ? where id = ?", unique, time.now(), node["id"])
+    return { "ok": true, "error": "" }
+
+# Mueve un nodo a otra carpeta (null = raíz). {"ok", "error"}.
+fn Json move_node(Json node, Json new_parent):
+    if new_parent != null:
+        if new_parent["is_dir"] != 1:
+            return { "ok": false, "error": "El destino no es una carpeta." }
+        if new_parent["id"] == node["id"]:
+            return { "ok": false, "error": "No se puede mover una carpeta dentro de sí misma." }
+        # Impide crear un ciclo moviendo una carpeta a su propio subárbol.
+        if await is_descendant(new_parent, node["id"]):
+            return { "ok": false, "error": "No se puede mover una carpeta dentro de sí misma." }
+    Json parent_id = new_parent == null ? null : new_parent["id"]
+    string unique = await unique_name(node["owner_id"], parent_id, node["name"])
+    await sqlite.exec("update nodes set parent_id = ?, name = ?, updated_at = ? where id = ?", parent_id, unique, time.now(), node["id"])
+    return { "ok": true, "error": "" }
+
+# Copia un nodo (y su subárbol) reutilizando los blobs originales.
+# {"ok", "error", "node"}.
+fn Json copy_node(Json node, Json new_parent, Json owner, Json cf, int depth):
+    if depth > 64:
+        return save_fail("La carpeta tiene demasiados niveles.")
+    if node["is_dir"] != 1:
+        string quota_problem = await quota_error(owner["id"], node["size"], cf)
+        if quota_problem != "":
+            return save_fail(quota_problem)
+
+    Json parent_id = new_parent == null ? null : new_parent["id"]
+    string id = new_id()
+    long now = time.now()
+    await sqlite.exec("insert into nodes (id, owner_id, parent_id, name, is_dir, blob_hash, size, mime_type, description, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", id, owner["id"], parent_id, await unique_name(owner["id"], parent_id, node["name"]), node["is_dir"], node["blob_hash"], node["size"], node["mime_type"], node["description"], now, now)
+
+    if node["is_dir"] != 1 and node["blob_hash"] != null:
+        await sqlite.exec("update blobs set refcount = refcount + 1 where hash = ?", node["blob_hash"])
+        await charge(owner["id"], node["size"])
+
+    Json clone = await get_node(id)
+    if node["is_dir"] == 1:
+        for Json child in await sqlite.query("select * from nodes where parent_id = ? and deleted_at is null", node["id"]):
+            Json r = await copy_node(child, clone, owner, cf, depth + 1)
+            if not r["ok"]:
+                return r
+    return save_ok(clone)
+
+# Envía a la papelera (o borra del todo si la papelera está desactivada).
+fn bool trash_node(Json node, Json cf):
+    if not cf["trash.enabled"]:
+        await purge_node(node, cf)
+        return true
+
+    long now = time.now()
+    await sqlite.exec("update nodes set trashed_from_id = parent_id, deleted_at = ? where id = ?", now, node["id"])
+    for Json child in await descendants(node):
+        if child["deleted_at"] == null:
+            await sqlite.exec("update nodes set trashed_from_id = parent_id, deleted_at = ? where id = ?", now, child["id"])
+
+    if not cf["trash.counts_against_quota"]:
+        int size = node["is_dir"] == 1 ? await folder_size(node) : node["size"]
+        await charge(node["owner_id"], 0 - size)
+    return true
+
+# Saca de la papelera. Devuelve el motivo del fallo, o "".
+fn string restore_node(Json node, Json cf):
+    # Si el padre original ya no existe o está en la papelera, vuelve a la raíz.
+    Json parent = node["trashed_from_id"] == null ? null : await get_node(node["trashed_from_id"])
+    if parent != null and parent["deleted_at"] != null:
+        parent = null
+
+    Json parent_id = parent == null ? null : parent["id"]
+    string name = await unique_name(node["owner_id"], parent_id, node["name"])
+
+    if not cf["trash.counts_against_quota"]:
+        int size = node["is_dir"] == 1 ? await folder_size(node) : node["size"]
+        string quota_problem = await quota_error(node["owner_id"], size, cf)
+        if quota_problem != "":
+            return quota_problem
+        await charge(node["owner_id"], size)
+
+    await sqlite.exec("update nodes set parent_id = ?, name = ?, deleted_at = null, trashed_from_id = null where id = ?", parent_id, name, node["id"])
+    for Json child in await descendants(node):
+        await sqlite.exec("update nodes set deleted_at = null, trashed_from_id = null where id = ?", child["id"])
+    return ""
+
+# Borrado definitivo: libera blobs, versiones y comparticiones.
+fn bool purge_node(Json node, Json cf):
+    bool counts_now = cf["trash.counts_against_quota"] or node["deleted_at"] == null
+    List<Json> targets = await descendants(node)
+    targets.add(node)
+
+    for Json target in targets:
+        for Json v in await sqlite.query("select * from node_versions where node_id = ?", target["id"]):
+            await release_blob(v["blob_hash"], cf)
+            await charge(node["owner_id"], 0 - v["size"])
+            await sqlite.exec("delete from node_versions where id = ?", v["id"])
+
+        if target["is_dir"] != 1:
+            await release_blob(target["blob_hash"], cf)
+            if counts_now:
+                await charge(node["owner_id"], 0 - target["size"])
+
+        await sqlite.exec("delete from shares where node_id = ?", target["id"])
+        await sqlite.exec("delete from share_links where node_id = ?", target["id"])
+        await sqlite.exec("delete from nodes where id = ?", target["id"])
+    return true
+
+fn int empty_trash(string owner_id, Json cf):
+    int count = 0
+    for Json node in await trashed_of(owner_id):
+        await purge_node(node, cf)
+        count = count + 1
+    return count
+
+# Vacía de la papelera lo que haya superado la retención.
+fn int purge_expired_trash(Json cf):
+    if not cf["trash.enabled"] or not cf["trash.retention"]:
+        return 0
+    long cutoff = time.now() - cf["trash.retention"] * 1000
+    List<Json> rows = await sqlite.query("select * from nodes where deleted_at is not null and deleted_at < ?", cutoff)
+    List<string> ids = []
+    for Json n in rows:
+        ids.add(n["id"])
+    int count = 0
+    for Json node in rows:
+        # Sólo las raíces del borrado; los hijos caen con ellas.
+        if node["trashed_from_id"] != null and ids.contains(node["trashed_from_id"]):
+            continue
+        await purge_node(node, cf)
+        count = count + 1
+    return count

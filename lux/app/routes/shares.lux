@@ -1,0 +1,110 @@
+# Gestión de comparticiones y enlaces.
+
+group(""):
+    require await gate_ok() else text("Acceso no permitido desde tu red.").status(403)
+
+    # ── Compartir con usuarios ──────────────────────────────────────────────
+
+    post endpoint("/files/:node_id/share", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "share", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "owner", cf)
+
+        string back = "/files/" + node_id + "/detail"
+        if a["access"]["source"] == "share" and not cf["sharing.allow_reshare"]:
+            return redirect(with_params(back, { "error": "No puedes volver a compartir algo compartido contigo." }), 303)
+        Json target = await get_user_by_name(form("username", "").trim())
+        if target == null:
+            return redirect(with_params(back, { "error": "No existe ese usuario." }), 303)
+
+        string message = form("message", "").trim()
+        int days = form_int("expires_days", 0)
+        Json r = await share_with_user(node, target, form("permission", "read"), p["user"], days * 86400, message == "" ? null : message, cf)
+        if not r["ok"]:
+            return redirect(with_params(back, { "error": r["error"] }), 303)
+        await audit_record(cf, "share_create", p, "node", node["id"], { "kind": "user", "to": target["username"], "permission": form("permission", "read") })
+        return redirect(with_params(back, { "ok": "Compartido con " + target["username"] + "." }), 303)
+
+    post endpoint("/shares/:share_id/delete", string share_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json share = first(await sqlite.query("select * from shares where id = ?", share_id))
+        if not (share != null):
+            abort(404, "Esa compartición no existe.")
+        Json node = await get_node(share["node_id"])
+        Json a = await authz(p, node, "owner", cf)
+        await unshare(share["id"])
+        return redirect(with_params("/files/" + node["id"] + "/detail", { "ok": "Compartición retirada." }), 303)
+
+    # ── Enlaces públicos ────────────────────────────────────────────────────
+
+    post endpoint("/files/:node_id/link", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "share_public", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "owner", cf)
+
+        List<string> networks = []
+        for string n in form("allowed_networks", "").split(","):
+            if n.trim() != "":
+                networks.add(n.trim())
+        int days = form_int("expires_days", 0)
+        int limit = form_int("download_limit", 0)
+        string note = form("note", "").trim()
+        Json r = await create_link(node, p["user"], form("mode", "download"), form("password", ""), days > 0 ? days * 86400 : null, limit > 0 ? limit : null, truthy(form("allow_listing", "")), networks, note == "" ? null : note, cf)
+        string back = "/files/" + node_id + "/detail"
+        if not r["ok"]:
+            return redirect(with_params(back, { "error": r["error"] }), 303)
+        await audit_record(cf, "share_create", p, "node", node["id"], { "kind": "link", "token": r["link"]["token"] })
+        return redirect(with_params(back, { "ok": "Enlace creado: " + link_url(r["link"], cf) }), 303)
+
+    post endpoint("/links/:link_id/revoke", string link_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json link = first(await sqlite.query("select * from share_links where id = ?", link_id))
+        if not (link != null):
+            abort(404, "Ese enlace no existe.")
+        Json node = await get_node(link["node_id"])
+        Json a = await authz(p, node, "owner", cf)
+        await revoke_link(link["id"])
+        return redirect(with_params("/files/" + node["id"] + "/detail", { "ok": "Enlace revocado." }), 303)
+
+    # Todos los enlaces creados por el usuario, para poder auditarlos.
+    get endpoint("/links"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        string tz = cf["app.timezone"]
+        List<Json> out = []
+        for Json l in await links_by_user(p["user"]["id"]):
+            Json row = {}.merge(l)
+            Json node = await get_node(l["node_id"])
+            row["node_found"] = node != null
+            row["node_id"] = l["node_id"]
+            row["node_name"] = node == null ? "" : node["name"]
+            row["node_icon"] = node == null ? "" : icon_for(node)
+            row["url"] = link_url(l, cf)
+            row["has_password"] = l["password_hash"] != null
+            row["expires_h"] = l["expires_at"] == null ? "sin caducidad" : fmt_date(l["expires_at"], tz)
+            row["downloads_text"] = str(l["download_count"]) + (l["download_limit"] == null ? "" : " / " + str(l["download_limit"]))
+            out.add(row)
+        return render("links.html", c=ctx(cf, p, { "links": out }))
+
+    # ── Visibilidad directa (público / red local) ───────────────────────────
+
+    post endpoint("/files/:node_id/visibility", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "owner", cf)
+
+        bool is_public = truthy(form("is_public", ""))
+        bool lan_visible = truthy(form("lan_visible", ""))
+        if is_public and node["is_public"] != 1:
+            allow(p, "share_public", cf)
+
+        await sqlite.exec("update nodes set is_public = ?, lan_visible = ? where id = ?", is_public ? 1 : 0, lan_visible ? 1 : 0, node["id"])
+        await audit_record(cf, "settings_change", p, "node", node["id"], { "is_public": is_public, "lan_visible": lan_visible })
+        return redirect(with_params("/files/" + node_id + "/detail", { "ok": "Visibilidad actualizada." }), 303)

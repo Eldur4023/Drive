@@ -1,0 +1,116 @@
+# Órdenes de administración, para `lux run app -- <orden> [args]` (el
+# envoltorio instalado es deploy/drive-cli.sh). Corren con todo el proyecto a
+# mano —lib/, la base de datos, `on start:`— y sin escuchar en ningún puerto.
+
+# Valor de una opción --nombre en los argumentos, o `fallback`.
+fn string option(List<string> args, string name, string fallback):
+    int i = 0
+    while i < len(args) - 1:
+        if args[i] == name:
+            return args[i + 1]
+        i = i + 1
+    return fallback
+
+# Contraseña de --password o, si falta, pedida dos veces sin eco.
+fn string ask_password(List<string> args):
+    string given = option(args, "--password", "")
+    if given != "":
+        return given
+    while true:
+        string p1 = await os.input_secret("Contraseña: ")
+        string p2 = await os.input_secret("Repite la contraseña: ")
+        if p1 == p2:
+            return p1
+        os.eprint("No coinciden.")
+    return ""
+
+command "createuser":
+    List<string> a = os.argv()
+    if len(a) < 1:
+        os.eprint("uso: createuser NOMBRE [--role admin|user|guest] [--email X] [--password P]")
+        os.exit(2)
+    Json cf = await config()
+    string username = a[0]
+    string email = option(a, "--email", "").trim().lower()
+    string role = option(a, "--role", "user")
+    if not regex.test("^[A-Za-z0-9._-]+$", username) or len(username) < 3:
+        os.eprint("Nombre de usuario no válido.")
+        os.exit(1)
+    if not in_list(role, ["admin", "user", "guest"]):
+        os.eprint("Rol no válido.")
+        os.exit(1)
+    if await get_user_by_name(username) != null:
+        os.eprint("El usuario '" + username + "' ya existe.")
+        os.exit(1)
+    string password = await ask_password(a)
+    List<string> problems = check_password_policy(password, username, email, cf)
+    if len(problems) > 0:
+        os.eprint(problems.join(" "))
+        os.exit(1)
+    long now = time.now()
+    await sqlite.exec(
+        "insert into users (id, username, email, password_hash, role, is_active, is_approved, created_at, password_changed_at) values (?, ?, ?, ?, ?, 1, 1, ?, ?)",
+        new_id(), username, email == "" ? null : email, await hash_password(password, cf), role, now, now)
+    os.print("Usuario '" + username + "' creado con rol " + role + ".")
+
+command "passwd":
+    List<string> a = os.argv()
+    if len(a) < 1:
+        os.eprint("uso: passwd NOMBRE [--password P]")
+        os.exit(2)
+    Json cf = await config()
+    Json user = await get_user_by_name(a[0])
+    if user == null:
+        os.eprint("No existe '" + a[0] + "'.")
+        os.exit(1)
+    string password = await ask_password(a)
+    List<string> problems = check_password_policy(password, user["username"], user["email"], cf)
+    if len(problems) > 0:
+        os.eprint(problems.join(" "))
+        os.exit(1)
+    await sqlite.exec("update users set password_hash = ?, password_changed_at = ? where id = ?", await hash_password(password, cf), time.now(), user["id"])
+    os.print("Contraseña actualizada.")
+
+command "listusers":
+    Json cf = await config()
+    List<Json> rows = await sqlite.query("select * from users order by username")
+    if len(rows) == 0:
+        os.print("No hay usuarios.")
+    else:
+        os.print(text.pad_right("USUARIO", 20, " ") + " " + text.pad_right("ROL", 8, " ") + " " + text.pad_right("ESTADO", 12, " ") + " " + text.pad_left("USO", 12, " "))
+        for Json u in rows:
+            string state_name = u["is_active"] == 1 ? "activo" : "desactivado"
+            if u["is_approved"] != 1:
+                state_name = "pendiente"
+            os.print(text.pad_right(u["username"], 20, " ") + " " + text.pad_right(u["role"], 8, " ") + " " + text.pad_right(state_name, 12, " ") + " " + text.pad_left(format_size(usage_of(u, cf)["used"]), 12, " "))
+
+command "recompute":
+    Json cf = await config()
+    for Json u in await sqlite.query("select * from users"):
+        os.print(u["username"] + ": " + format_size(await recompute_usage(u, cf)))
+
+command "maintenance":
+    Json cf = await config()
+    Json result = await maintenance_run(cf)
+    List<string> parts = []
+    for string k in result:
+        parts.add(k + "=" + str(result[k]))
+    os.print(parts.join(", "))
+
+# Configuración efectiva y avisos de seguridad (sale con 1 si hay avisos).
+command "check":
+    Json cf = await config()
+    os.print("Instancia:  " + cf["app.name"] + " — " + cf["app.base_url"])
+    os.print("Blobs:      " + cf["storage.root"])
+    os.print("Red:        modo=" + cf["network.trusted_mode"] + " ámbito=" + cf["network.trusted_scope"] + " redes=" + (len(cf["network.trusted_networks"]) == 0 ? "ninguna" : cf["network.trusted_networks"].join(", ")))
+    os.print("Registro:   " + (cf["auth.registration_enabled"] ? "abierto" : "cerrado") + (cf["auth.require_admin_approval"] ? " con aprobación" : ""))
+    os.print("Enlaces:    " + (cf["sharing.public_links_enabled"] ? "activados" : "desactivados"))
+    List<string> warnings = config_warnings(cf)
+    if len(warnings) > 0:
+        os.print("")
+        os.print("Avisos:")
+        for string w in warnings:
+            os.print("  ! " + w)
+        os.exit(1)
+    os.print("")
+    os.print("Sin avisos.")

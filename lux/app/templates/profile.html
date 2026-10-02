@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Mi perfil · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+{% if c["new_token"] != "" %}
+  <div class="notice warn">
+    <b>Token creado.</b> Cópialo ahora: no se volverá a mostrar.
+    <div class="token-box mono" style="margin-top:8px">{{ c["new_token"] }}</div>
+    <button class="small" data-copy="{{ c["new_token"] }}">Copiar</button>
+  </div>
+{% endif %}
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Datos de la cuenta</h2>
+    <form method="post" action="/profile">
+      <div class="field">
+        <label for="display_name">Nombre visible</label>
+        <input id="display_name" name="display_name" value="{{ c["me"]["display_name"] }}" style="width:100%">
+      </div>
+      <div class="field">
+        <label for="email">Correo</label>
+        <input id="email" name="email" type="email" value="{{ c["me"]["email"] }}" style="width:100%">
+      </div>
+      <div class="field">
+        <label for="bio">Descripción</label>
+        <textarea id="bio" name="bio">{{ c["me"]["bio"] }}</textarea>
+      </div>
+      <button class="primary" type="submit">Guardar</button>
+    </form>
+
+    <h3>Perfil asignado</h3>
+    <table>
+      <tr><th>Usuario</th><td class="mono">{{ c["me"]["username"] }}</td></tr>
+      <tr><th>Rol</th><td>{{ c["me"]["role"] }}</td></tr>
+      <tr><th>Espacio</th>
+        <td>
+          {{ c["usage"]["used_h"] }}{% if not c["usage"]["unlimited"] %} de {{ c["usage"]["quota_h"] }}{% endif %}
+          <div class="meter {% if c["usage"]["percent"] > 90 %}full{% endif %}"><span style="width: {{ c["usage"]["percent"] }}%"></span></div>
+        </td>
+      </tr>
+      <tr><th>Máximo por fichero</th><td>{{ c["max_upload_h"] }}</td></tr>
+      <tr><th>Puede subir</th><td>{{ c["can"]["upload"] ? "sí" : "no" }}</td></tr>
+      <tr><th>Puede borrar</th><td>{{ c["can"]["delete"] ? "sí" : "no" }}</td></tr>
+      <tr><th>Enlaces públicos</th><td>{{ c["can"]["share_public"] ? "sí" : "no" }}</td></tr>
+      <tr><th>Alta</th><td>{{ c["me"]["created_h"] }}</td></tr>
+      <tr><th>Último acceso</th><td>{{ c["me"]["last_login_h"] }}</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Preferencias</h2>
+    <form method="post" action="/profile/preferences">
+      <div class="field">
+        <label for="theme">Tema</label>
+        <select id="theme" name="theme">
+          <option value="auto" {% if c["prefs"]["theme"] == "auto" %}selected{% endif %}>Según el sistema</option>
+          <option value="light" {% if c["prefs"]["theme"] == "light" %}selected{% endif %}>Claro</option>
+          <option value="dark" {% if c["prefs"]["theme"] == "dark" %}selected{% endif %}>Oscuro</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="order">Orden por defecto</label>
+        <select id="order" name="order">
+          <option value="name" {% if c["prefs"]["order"] == "name" %}selected{% endif %}>Nombre</option>
+          <option value="size" {% if c["prefs"]["order"] == "size" %}selected{% endif %}>Tamaño</option>
+          <option value="modified" {% if c["prefs"]["order"] == "modified" %}selected{% endif %}>Modificación</option>
+          <option value="created" {% if c["prefs"]["order"] == "created" %}selected{% endif %}>Creación</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="view">Vista</label>
+        <select id="view" name="view">
+          <option value="list" {% if c["prefs"]["view"] == "list" %}selected{% endif %}>Lista</option>
+          <option value="grid" {% if c["prefs"]["view"] == "grid" %}selected{% endif %}>Cuadrícula</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="items_per_page">Elementos por página</label>
+        <input id="items_per_page" name="items_per_page" type="number" min="10" max="500"
+               value="{{ c["prefs"]["items_per_page"] }}">
+      </div>
+      <button class="primary" type="submit">Guardar preferencias</button>
+    </form>
+
+    <h2 style="margin-top:22px">Contraseña</h2>
+    <form method="post" action="/profile/password">
+      <div class="field">
+        <label for="current">Contraseña actual</label>
+        <input id="current" name="current" type="password" autocomplete="current-password" required style="width:100%">
+      </div>
+      <div class="field">
+        <label for="password">Nueva contraseña</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required style="width:100%">
+      </div>
+      <div class="field">
+        <label for="password2">Repite la nueva</label>
+        <input id="password2" name="password2" type="password" autocomplete="new-password" required style="width:100%">
+      </div>
+      <button class="primary" type="submit">Cambiar contraseña</button>
+    </form>
+
+    <h2 style="margin-top:22px">Segundo factor</h2>
+    {% if c["me"]["totp_enabled"] == 1 %}
+      <p class="muted">Activo.</p>
+      <form method="post" action="/2fa/disable" class="row">
+        <input name="password" type="password" placeholder="Tu contraseña" required>
+        <button class="danger" type="submit">Desactivar</button>
+      </form>
+    {% elif c["cf"]["security.totp.enabled"] %}
+      <p class="muted">No está activo.</p>
+      <a class="button primary" href="/2fa/setup">Activar 2FA</a>
+    {% else %}
+      <p class="muted">El segundo factor está desactivado en esta instancia.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Sesiones activas</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Origen</th><th class="hide-sm">Navegador</th><th>Último uso</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for s in c["sessions"] %}
+        <tr>
+          <td>
+            <span class="mono">{{ s["ip_h"] }}</span>
+            {% if s["current"] %}<span class="tag lan">esta sesión</span>{% endif %}
+            {% if s["from_trusted_network"] == 1 %}<span class="tag">red local</span>{% endif %}
+          </td>
+          <td class="hide-sm muted">{{ s["agent_h"] }}</td>
+          <td class="muted">{{ s["last_seen_rel"] }}</td>
+          <td class="right">
+            {% if not s["current"] %}
+              <form class="inline" method="post" action="/profile/sessions/{{ s["id"] }}/revoke">
+                <button class="small danger" type="submit">Cerrar</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <form method="post" action="/profile/sessions/revoke-all" style="margin-top:12px"
+        data-confirm="¿Cerrar todas las demás sesiones?">
+    <button class="danger" type="submit">Cerrar las demás sesiones</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Tokens de API</h2>
+  <p class="muted">
+    Para scripts y copias de seguridad. Se usan con la cabecera
+    <span class="mono">Authorization: Bearer &lt;token&gt;</span>.
+  </p>
+  <form method="post" action="/profile/tokens" class="row">
+    <input name="name" placeholder="Nombre (p. ej. backup-servidor)" required>
+    {% for scope in c["scopes"] %}
+      <label class="row" style="margin:0">
+        <input type="checkbox" name="scopes" value="{{ scope }}" {% if scope == "read" %}checked{% endif %}> {{ scope }}
+      </label>
+    {% endfor %}
+    <input name="expires_days" type="number" min="0" value="0" title="Días hasta caducar (0 = sin caducidad)" style="width:110px">
+    <button class="primary" type="submit">Crear token</button>
+  </form>
+
+  {% if len(c["tokens"]) > 0 %}
+  <div class="table-wrap" style="margin-top:14px">
+    <table>
+      <thead><tr><th>Nombre</th><th>Ámbitos</th><th class="hide-sm">Último uso</th><th class="hide-sm">Caduca</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for token in c["tokens"] %}
+        <tr>
+          <td>{{ token["name"] }}</td>
+          <td class="muted">{{ token["scopes_h"] }}</td>
+          <td class="hide-sm muted">{{ token["last_used_rel"] }}</td>
+          <td class="hide-sm muted">{{ token["expires_h"] }}</td>
+          <td class="right">
+            <form class="inline" method="post" action="/profile/tokens/{{ token["id"] }}/revoke"
+                  data-confirm="¿Revocar este token?">
+              <button class="small danger" type="submit">Revocar</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

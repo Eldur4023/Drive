@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="{{ c["language"] }}" data-theme="{{ c["theme"] }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ c["app_name"] }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">{{ c["app_name"] }}</a>
+
+  {% if c["auth"] %}
+    <form class="search" action="/search" method="get">
+      <input type="search" name="q" placeholder="Buscar…" value="{{ c["q"] }}">
+    </form>
+    <nav>
+      <a href="/files">Mis ficheros</a>
+      <a href="/shared">Compartidos</a>
+      <a href="/links">Enlaces</a>
+      <a href="/trash">Papelera</a>
+      {% if c["can"]["admin"] or c["can"]["settings"] %}<a href="/admin">Administración</a>{% endif %}
+    </nav>
+    <div class="account">
+      {% if c["kind"] == "network" %}<span class="tag lan" title="Sesión abierta por estar en una red de confianza">red local</span>{% endif %}
+      {% if c["readonly"] %}<span class="tag warn">sólo lectura</span>{% endif %}
+      <a href="/profile">{{ c["user_label"] }}</a>
+      <form method="post" action="/logout"><button class="link">Salir</button></form>
+    </div>
+  {% else %}
+    <nav>
+      <a href="/browse">Público</a>
+    </nav>
+    <div class="account">
+      {% if c["trusted_network"] %}<span class="tag lan">red local</span>{% endif %}
+      <a class="button" href="/login">Iniciar sesión</a>
+    </div>
+  {% endif %}
+</header>
+
+<main>
+  {% if c["ok"] != "" %}<div class="notice ok">{{ c["ok"] }}</div>{% endif %}
+  {% if c["error"] != "" %}<div class="notice error">{{ c["error"] }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+
+<footer>
+  <span>{{ c["app_name"] }}</span>
+  {% if c["footer"] %}<span>{{ c["footer"] }}</span>{% endif %}
+</footer>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

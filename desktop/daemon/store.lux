@@ -1,0 +1,87 @@
+# Estado local del servicio. Las marcas de tiempo son milisegundos UTC.
+#
+#   settings  server_url, token (de Drive), api_token (de esta API local), ...
+#   links     una fila por carpeta local enlazada con una carpeta de Drive
+#   entries   lo último que se sincronizó de cada ruta: es la «base» del
+#             algoritmo de tres vías; sin ella no se distingue «borrado» de «nuevo»
+#   events    registro corto para la app de escritorio
+
+fn List<string> schema():
+    return [
+        "create table if not exists settings (key text primary key, value text not null)",
+        """
+        create table if not exists links (
+            id integer primary key autoincrement,
+            local_path text not null unique,
+            remote_id text not null default '',
+            remote_name text not null default '',
+            enabled integer not null default 1,
+            status text not null default 'pendiente',
+            last_sync integer not null default 0,
+            last_attempt integer not null default 0,
+            last_error text not null default '',
+            force integer not null default 1,
+            created_at integer not null
+        )
+        """,
+        """
+        create table if not exists entries (
+            link_id integer not null,
+            path text not null,
+            is_dir integer not null,
+            hash text not null default '',
+            size integer not null default 0,
+            mtime integer not null default 0,
+            remote_id text not null default '',
+            primary key (link_id, path)
+        )
+        """,
+        """
+        create table if not exists events (
+            id integer primary key autoincrement,
+            ts integer not null,
+            link_id integer,
+            level text not null,
+            message text not null
+        )
+        """
+    ]
+
+fn string setting(string key, string fallback):
+    List<Json> rows = await sqlite.query("select value from settings where key = ?", key)
+    if len(rows) == 0:
+        return fallback
+    return str(rows[0]["value"])
+
+fn bool put_setting(string key, string value):
+    await sqlite.exec("insert into settings (key, value) values (?, ?) on conflict(key) do update set value = excluded.value", key, value)
+    return true
+
+# Un evento para la app de escritorio (y para el diario del servicio).
+fn bool note(int link_id, string level, string message):
+    if level == "error":
+        log.error(message)
+    else:
+        log.info(message)
+    await sqlite.exec("insert into events (ts, link_id, level, message) values (?, ?, ?, ?)", time.now(), link_id, level, message)
+    # ponytail: se conservan los últimos 500; si hiciera falta histórico, a un fichero.
+    await sqlite.exec("delete from events where id <= (select max(id) from events) - 500")
+    return true
+
+on start:
+    for string ddl in schema():
+        await sqlite.exec(ddl)
+
+    # Secreto de la API local. La app de escritorio lo lee de este fichero, así
+    # que sólo la entiende quien pueda leerlo (el usuario del servicio).
+    string home = os.getenv("DRIVE_SYNC_HOME", ".")
+    string token = await setting("api_token", "")
+    if token == "":
+        token = hash.token(32)
+        await put_setting("api_token", token)
+    string token_file = os.path_join(home, "api-token")
+    await os.write_file(token_file, token)
+    os.chmod(token_file, "600")
+    # La base guarda el token de Drive: sólo para el usuario del servicio.
+    os.chmod(os.getenv("DRIVE_SYNC_DB", "./state.db"), "600")
+    log.info("Drive Sync listo; secreto de la API en " + token_file)

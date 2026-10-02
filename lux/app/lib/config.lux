@@ -1,0 +1,489 @@
+# Configuración en capas, de menor a mayor prioridad:
+#
+#   1. Los defaults de defaults() (este fichero).
+#   2. El fichero config/config.json (o el de DRIVE_CONFIG).
+#   3. Los ajustes guardados desde /admin/settings (tabla settings).
+#   4. Variables de entorno DRIVE_*, con "__" como separador de nivel:
+#        DRIVE_SECURITY__SECRET_KEY, DRIVE_NETWORK__TRUSTED_MODE='readonly'...
+#
+# La configuración efectiva es un diccionario PLANO con claves punteadas
+# ("security.session.lifetime"), ya normalizado: tamaños en bytes, duraciones
+# en segundos, listas como listas. Se guarda en state y se reconstruye cuando
+# un administrador cambia un ajuste. No se debe mutar nunca: se comparte entre
+# peticiones.
+
+fn Json defaults():
+    return {
+        "app.name": "Drive",
+        "app.base_url": "http://localhost:8000",
+        "app.language": "es",
+        "app.timezone": "Europe/Madrid",
+
+        "server.behind_proxy": false,
+        "server.trusted_proxies": ["127.0.0.1/32", "::1/128"],
+
+        "storage.root": "./data/blobs",
+        "storage.max_upload_size": 2147483648,
+        "storage.default_quota": 10737418240,
+        "storage.deduplicate": true,
+        "storage.hash_algorithm": "sha256",
+        "storage.blocked_extensions": [],
+        "storage.allowed_extensions": [],
+        "storage.blocked_mime_types": [],
+
+        "trash.enabled": true,
+        "trash.retention": 2592000,
+        "trash.counts_against_quota": true,
+
+        "versions.enabled": true,
+        "versions.max_per_file": 10,
+        "versions.retention": 7776000,
+
+        "thumbnails.enabled": true,
+        "thumbnails.sizes": [128, 512],
+        "thumbnails.max_source_size": 26214400,
+
+        "auth.registration_enabled": false,
+        "auth.allowed_email_domains": [],
+        "auth.require_admin_approval": true,
+        "auth.default_role": "user",
+        "auth.allow_email_login": true,
+
+        "security.secret_key": "CAMBIAME-EN-PRODUCCION",
+        "security.password_hash": "argon2",
+        "security.password_policy.min_length": 10,
+        "security.password_policy.require_uppercase": true,
+        "security.password_policy.require_lowercase": true,
+        "security.password_policy.require_digit": true,
+        "security.password_policy.require_symbol": false,
+        "security.password_policy.reject_username_in_password": true,
+        "security.session.lifetime": 604800,
+        "security.session.absolute_lifetime": 2592000,
+        "security.session.cookie_name": "drive_session",
+        "security.session.cookie_secure": false,
+        "security.session.cookie_samesite": "lax",
+        "security.session.revoke_on_password_change": true,
+        "security.lockout.enabled": true,
+        "security.lockout.max_attempts": 5,
+        "security.lockout.window": 900,
+        "security.lockout.duration": 1800,
+        "security.lockout.track_by_ip": true,
+        "security.totp.enabled": true,
+        "security.totp.required_for_roles": ["admin"],
+        "security.totp.issuer": "Drive",
+
+        "rate_limit.enabled": true,
+        "rate_limit.login.requests": 10,
+        "rate_limit.login.window": 300,
+        "rate_limit.signup.requests": 5,
+        "rate_limit.signup.window": 3600,
+        "rate_limit.api.requests": 600,
+        "rate_limit.api.window": 60,
+        "rate_limit.download.requests": 300,
+        "rate_limit.download.window": 60,
+        "rate_limit.exempt_networks": ["127.0.0.1/32"],
+
+        "network.trusted_networks": [],
+        "network.trusted_mode": "none",
+        "network.trusted_user": null,
+        "network.trusted_scope": "public",
+        "network.require_login_for": ["upload", "delete", "share", "admin", "settings"],
+        "network.allow_session_ip_change": true,
+        "network.denied_networks": [],
+
+        "sharing.internal_enabled": true,
+        "sharing.public_links_enabled": true,
+        "sharing.public_links_roles": ["admin", "user"],
+        "sharing.require_password_on_public_links": false,
+        "sharing.default_link_expiry": 2592000,
+        "sharing.max_link_expiry": 31536000,
+        "sharing.allow_upload_links": true,
+        "sharing.allow_reshare": false,
+        "sharing.token_length": 22,
+        "sharing.default_download_limit": null,
+
+        "roles.admin.quota": null,
+        "roles.admin.max_upload_size": null,
+        "roles.admin.can_share_public": true,
+        "roles.admin.can_share_internal": true,
+        "roles.admin.can_upload": true,
+        "roles.admin.can_delete": true,
+        "roles.admin.can_manage_users": true,
+        "roles.admin.can_edit_settings": true,
+        "roles.user.quota": 10737418240,
+        "roles.user.max_upload_size": null,
+        "roles.user.can_share_public": true,
+        "roles.user.can_share_internal": true,
+        "roles.user.can_upload": true,
+        "roles.user.can_delete": true,
+        "roles.user.can_manage_users": false,
+        "roles.user.can_edit_settings": false,
+        "roles.guest.quota": 536870912,
+        "roles.guest.max_upload_size": null,
+        "roles.guest.can_share_public": false,
+        "roles.guest.can_share_internal": false,
+        "roles.guest.can_upload": false,
+        "roles.guest.can_delete": false,
+        "roles.guest.can_manage_users": false,
+        "roles.guest.can_edit_settings": false,
+
+        "audit.enabled": true,
+        "audit.events": ["login", "login_failed", "logout", "upload", "download", "delete", "share_create", "share_access", "user_create", "settings_change"],
+        "audit.retention": 15552000,
+        "audit.store_ip": true,
+
+        "ui.theme": "auto",
+        "ui.items_per_page": 100,
+        "ui.show_trusted_network_hint": true,
+        "ui.footer_text": null,
+
+        "maintenance.enabled": true,
+        "maintenance.interval": 3600,
+        "maintenance.purge_trash": true,
+        "maintenance.purge_versions": true,
+        "maintenance.purge_sessions": true,
+        "maintenance.purge_audit": true,
+        "maintenance.purge_orphan_blobs": true
+    }
+
+# Claves que sólo pueden tocarse en el fichero o por entorno, nunca desde el
+# panel: cambiarlas en caliente rompería el proceso o permitiría a un admin
+# comprometido reescribir el secreto de firma.
+fn List<string> locked_keys():
+    return ["storage.root", "storage.hash_algorithm", "security.secret_key", "security.password_hash"]
+
+# ── Normalización ───────────────────────────────────────────────────────────
+
+fn bool is_size_key(string key):
+    return key == "storage.max_upload_size" or key == "storage.default_quota" or key == "thumbnails.max_source_size" or key.ends_with(".quota") or (key.starts_with("roles.") and key.ends_with(".max_upload_size"))
+
+fn bool is_duration_key(string key):
+    return in_list(key, ["trash.retention", "versions.retention", "security.session.lifetime", "security.session.absolute_lifetime", "security.lockout.window", "security.lockout.duration", "sharing.default_link_expiry", "sharing.max_link_expiry", "audit.retention", "maintenance.interval"]) or (key.starts_with("rate_limit.") and key.ends_with(".window"))
+
+# Convierte un valor leído del fichero, de la base de datos o del entorno al
+# formato interno de su clave. Los tamaños y duraciones admiten sufijos
+# ("2GB", "30d"); 0 en un límite de tamaño significa "sin límite".
+fn Json normalize(string key, Json value):
+    if value == null:
+        return null
+    if is_size_key(key):
+        Json r = parse_size(str(value))
+        if not r["ok"]:
+            return null
+        return r["v"] == 0 ? null : r["v"]
+    if is_duration_key(key):
+        Json r = parse_duration(str(value))
+        if not r["ok"]:
+            return null
+        return r["v"]
+    if key.ends_with("_networks") or key.ends_with("_extensions") or key.ends_with("_domains") or key.ends_with("_types"):
+        return normalize_list(key, value)
+    return value
+
+fn Json normalize_list(string key, Json value):
+    List<Json> out = []
+    for Json item in value:
+        string s = str(item).trim()
+        if s == "":
+            continue
+        if key.ends_with("_extensions"):
+            s = s.lower()
+            s = s.starts_with(".") ? s : "." + s
+        out.add(s)
+    return out
+
+# ¿Es un diccionario? Json no tiene un typeof: se prueba con una operación que
+# sólo existe en los diccionarios.
+fn bool is_dict(Json v):
+    try:
+        v.keys()
+        return true
+    catch e:
+        return false
+
+# {"a": {"b": 1}} -> {"a.b": 1}. Las listas y los escalares quedan tal cual.
+fn Json flatten(Json node, string prefix, Json out):
+    for string k in node:
+        string key = prefix == "" ? k : prefix + "." + k
+        if is_dict(node[k]):
+            flatten(node[k], key, out)
+        else:
+            out[key] = node[k]
+    return out
+
+fn Json parse_loose(string raw):
+    try:
+        return json.parse(raw)
+    catch e:
+        return raw
+
+# ── Carga ───────────────────────────────────────────────────────────────────
+
+fn string config_path():
+    return os.getenv("DRIVE_CONFIG", "config/config.json")
+
+fn Json file_config():
+    string path = config_path()
+    if not os.is_file(path):
+        return {}
+    try:
+        string raw = await os.read_file(path)
+        return flatten(json.parse(raw), "", {})
+    catch e:
+        log.error("no se pudo leer " + path + ": " + e.message)
+        return {}
+
+fn Json db_overrides():
+    Json out = {}
+    try:
+        List<Json> rows = await sqlite.query("select key, value from settings")
+        for Json r in rows:
+            if in_list(r["key"], locked_keys()):
+                continue
+            Json parsed = json.parse(r["value"])
+            out[r["key"]] = parsed["v"]
+    catch e:
+        # La tabla puede no existir aún en la primera petición.
+        return {}
+    return out
+
+# Reconstruye la configuración efectiva.
+fn Json build_config():
+    Json c = defaults()
+    Json known = defaults()
+    Json fromfile = await file_config()
+    for string k in fromfile:
+        if known.has(k):
+            c[k] = normalize(k, fromfile[k])
+    Json fromdb = await db_overrides()
+    for string k in fromdb:
+        if known.has(k):
+            c[k] = normalize(k, fromdb[k])
+    for string k in known:
+        string envname = "DRIVE_" + k.upper().replace(".", "__")
+        string raw = os.getenv(envname, "")
+        if raw != "":
+            c[k] = normalize(k, parse_loose(raw))
+    c["app.base_url"] = str(c["app.base_url"]).trim()
+    while str(c["app.base_url"]).ends_with("/"):
+        c["app.base_url"] = str(c["app.base_url"]).slice(0, len(str(c["app.base_url"])) - 1)
+    return c
+
+# Configuración activa. Se recarga con invalidate_config().
+fn Json config():
+    Json c = state.get("cfg", null)
+    if c == null:
+        c = await build_config()
+        state.set("cfg", c)
+    return c
+
+# Versión sin base de datos, para los manejadores de error: la guardada o, si
+# todavía no hay ninguna, los defaults.
+fn Json config_now():
+    Json c = state.get("cfg", null)
+    return c == null ? defaults() : c
+
+fn bool invalidate_config():
+    state.remove("cfg")
+    return true
+
+# Perfil de un rol, con caída al más restrictivo.
+fn Json role_profile(Json cf, string role):
+    string name = cf.has("roles." + role + ".can_upload") ? role : "guest"
+    string p = "roles." + name + "."
+    return {
+        "name": name,
+        "quota": cf[p + "quota"],
+        "max_upload_size": cf[p + "max_upload_size"],
+        "can_share_public": cf[p + "can_share_public"],
+        "can_share_internal": cf[p + "can_share_internal"],
+        "can_upload": cf[p + "can_upload"],
+        "can_delete": cf[p + "can_delete"],
+        "can_manage_users": cf[p + "can_manage_users"],
+        "can_edit_settings": cf[p + "can_edit_settings"]
+    }
+
+# Avisos de configuración peligrosa.
+fn List<string> config_warnings(Json cf):
+    List<string> w = []
+    if cf["security.secret_key"] == "CAMBIAME-EN-PRODUCCION":
+        w.add("security.secret_key sigue siendo el valor por defecto: cualquiera puede falsificar sesiones. Cámbialo ya.")
+    if str(cf["app.base_url"]).starts_with("https://") and not cf["security.session.cookie_secure"]:
+        w.add("base_url es https pero security.session.cookie_secure es false: la cookie de sesión viajará también por http.")
+    if cf["network.trusted_mode"] == "full" and not cf["network.trusted_user"]:
+        w.add("network.trusted_mode es 'full' pero network.trusted_user está vacío: el acceso por red de confianza quedará desactivado.")
+    if cf["network.trusted_mode"] != "none" and len(cf["network.trusted_networks"]) == 0:
+        w.add("network.trusted_mode está activo pero no hay trusted_networks definidas: ningún cliente será considerado de confianza.")
+    if cf["server.behind_proxy"] and len(cf["server.trusted_proxies"]) == 0:
+        w.add("server.behind_proxy es true sin trusted_proxies: se aceptarán cabeceras X-Forwarded-For de cualquier origen, lo que permite falsificar la IP del cliente y saltarse las redes de confianza.")
+    return w
+
+# ── Catálogo de ajustes editables en caliente ───────────────────────────────
+
+fn Json setting(string key, string label, string kind, string help, List<string> options):
+    return { "key": key, "label": label, "kind": kind, "help": help, "options": options }
+
+fn List<Json> settings_groups():
+    return [
+        {
+            "name": "General",
+            "settings": [
+                setting("app.name", "Nombre de la instancia", "str", "", []),
+                setting("app.base_url", "URL pública", "str", "Se usa para construir los enlaces compartidos.", []),
+                setting("app.timezone", "Zona horaria", "str", "Nombre IANA: Europe/Madrid, UTC…", []),
+                setting("ui.theme", "Tema por defecto", "choice", "", ["auto", "light", "dark"]),
+                setting("ui.items_per_page", "Elementos por página", "int", "", []),
+                setting("ui.footer_text", "Texto del pie", "str", "", [])
+            ]
+        },
+        {
+            "name": "Cuentas",
+            "settings": [
+                setting("auth.registration_enabled", "Registro abierto", "bool", "", []),
+                setting("auth.require_admin_approval", "Aprobar cuentas nuevas a mano", "bool", "", []),
+                setting("auth.default_role", "Rol por defecto", "choice", "", ["admin", "user", "guest"]),
+                setting("auth.allow_email_login", "Permitir entrar con el correo", "bool", "", []),
+                setting("auth.allowed_email_domains", "Dominios de correo admitidos", "list", "Separados por comas. Vacío = cualquiera.", [])
+            ]
+        },
+        {
+            "name": "Seguridad",
+            "settings": [
+                setting("security.password_policy.min_length", "Longitud mínima de contraseña", "int", "", []),
+                setting("security.password_policy.require_uppercase", "Exigir mayúscula", "bool", "", []),
+                setting("security.password_policy.require_digit", "Exigir dígito", "bool", "", []),
+                setting("security.password_policy.require_symbol", "Exigir símbolo", "bool", "", []),
+                setting("security.session.lifetime", "Duración de la sesión", "duration", "Ejemplos: 12h, 7d, 30d.", []),
+                setting("security.session.cookie_secure", "Cookie sólo por HTTPS", "bool", "Actívalo en cuanto sirvas por HTTPS.", []),
+                setting("security.lockout.enabled", "Bloqueo por intentos fallidos", "bool", "", []),
+                setting("security.lockout.max_attempts", "Intentos antes de bloquear", "int", "", []),
+                setting("security.lockout.duration", "Duración del bloqueo", "duration", "", []),
+                setting("security.totp.enabled", "Segundo factor disponible", "bool", "", []),
+                setting("security.totp.required_for_roles", "Roles obligados a usar 2FA", "list", "", [])
+            ]
+        },
+        {
+            "name": "Red local",
+            "settings": [
+                setting("network.trusted_networks", "Redes de confianza", "list", "CIDR separados por comas: 192.168.1.0/24, 10.0.0.0/8.", []),
+                setting("network.trusted_mode", "Modo en red de confianza", "choice", "none: pedir login siempre. readonly: navegar y descargar sin login. full: sesión automática como el usuario indicado.", ["none", "readonly", "full"]),
+                setting("network.trusted_user", "Usuario suplantado en modo full", "str", "", []),
+                setting("network.trusted_scope", "Qué se ve sin login desde la red", "choice", "", ["public", "shared", "trusted_user"]),
+                setting("network.require_login_for", "Acciones que siempre piden login", "list", "upload, delete, share, admin, settings, download.", []),
+                setting("network.allow_session_ip_change", "Permitir que la sesión cambie de IP", "bool", "", []),
+                setting("network.denied_networks", "Redes bloqueadas", "list", "", [])
+            ]
+        },
+        {
+            "name": "Compartición",
+            "settings": [
+                setting("sharing.internal_enabled", "Compartir entre usuarios", "bool", "", []),
+                setting("sharing.public_links_enabled", "Enlaces públicos", "bool", "", []),
+                setting("sharing.require_password_on_public_links", "Exigir contraseña en los enlaces", "bool", "", []),
+                setting("sharing.default_link_expiry", "Caducidad por defecto", "duration", "", []),
+                setting("sharing.max_link_expiry", "Caducidad máxima", "duration", "", []),
+                setting("sharing.allow_upload_links", "Permitir enlaces de subida", "bool", "", []),
+                setting("sharing.allow_reshare", "Permitir volver a compartir", "bool", "", [])
+            ]
+        },
+        {
+            "name": "Almacenamiento",
+            "settings": [
+                setting("storage.max_upload_size", "Tamaño máximo por fichero", "size", "Ejemplos: 100MB, 2GB.", []),
+                setting("storage.default_quota", "Cuota por defecto", "size", "", []),
+                setting("storage.blocked_extensions", "Extensiones bloqueadas", "list", "", []),
+                setting("storage.allowed_extensions", "Extensiones permitidas", "list", "Si no está vacío actúa como lista blanca exclusiva.", []),
+                setting("trash.enabled", "Papelera", "bool", "", []),
+                setting("trash.retention", "Retención en papelera", "duration", "", []),
+                setting("versions.enabled", "Historial de versiones", "bool", "", []),
+                setting("versions.max_per_file", "Versiones por fichero", "int", "", []),
+                setting("thumbnails.enabled", "Miniaturas", "bool", "", [])
+            ]
+        },
+        {
+            "name": "Límites y registro",
+            "settings": [
+                setting("rate_limit.enabled", "Límite de peticiones", "bool", "", []),
+                setting("rate_limit.login.requests", "Intentos de login por ventana", "int", "", []),
+                setting("rate_limit.download.requests", "Descargas por minuto", "int", "", []),
+                setting("audit.enabled", "Auditoría", "bool", "", []),
+                setting("audit.retention", "Retención de auditoría", "duration", "", []),
+                setting("audit.store_ip", "Guardar la IP en la auditoría", "bool", "", []),
+                setting("maintenance.enabled", "Tareas de mantenimiento", "bool", "", []),
+                setting("maintenance.interval", "Intervalo de mantenimiento", "duration", "", [])
+            ]
+        }
+    ]
+
+# El ajuste con esa clave, o null.
+fn Json find_setting(string key):
+    for Json g in settings_groups():
+        for Json s in g["settings"]:
+            if s["key"] == key:
+                return s
+    return null
+
+# Texto de un formulario -> valor interno. {"ok": bool, "v": valor, "err": msg}
+fn Json parse_setting(Json s, string raw):
+    string r = raw.trim()
+    string kind = s["kind"]
+    switch kind:
+        case "bool":
+            return { "ok": true, "v": truthy(r), "err": "" }
+        case "int":
+            try:
+                return { "ok": true, "v": r == "" ? 0 : int(r), "err": "" }
+            catch e:
+                return { "ok": false, "v": null, "err": "no es un número: " + r }
+        case "list":
+            List<string> items = []
+            for string part in r.split(","):
+                if part.trim() != "":
+                    items.add(part.trim())
+            return { "ok": true, "v": items, "err": "" }
+        case "size":
+            if r == "":
+                return { "ok": true, "v": null, "err": "" }
+            return parse_size(r)
+        case "duration":
+            if r == "":
+                return { "ok": true, "v": null, "err": "" }
+            return parse_duration(r)
+        case "choice":
+            if len(s["options"]) > 0 and not in_list(r, s["options"]):
+                return { "ok": false, "v": null, "err": "valor no admitido: " + r }
+            return { "ok": true, "v": r, "err": "" }
+        else:
+            return { "ok": true, "v": r == "" ? null : r, "err": "" }
+
+# Valor interno -> texto para el formulario.
+fn string display_setting(Json s, Json value):
+    if value == null:
+        return ""
+    string kind = s["kind"]
+    if kind == "list":
+        List<string> parts = []
+        for Json v in value:
+            parts.add(str(v))
+        return parts.join(", ")
+    if kind == "size":
+        return value == 0 ? "" : format_size(value)
+    if kind == "duration":
+        return humanize_duration(value)
+    if kind == "bool":
+        return value ? "true" : "false"
+    return str(value)
+
+# ── Escritura de ajustes ────────────────────────────────────────────────────
+
+# Guarda un ajuste y recarga la configuración.
+fn bool set_override(string key, Json value, Json user_id):
+    string stored = json.stringify({ "v": value })
+    await sqlite.exec("insert into settings (key, value, updated_at, updated_by) values (?, ?, ?, ?) on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at, updated_by = excluded.updated_by", key, stored, time.now(), user_id)
+    invalidate_config()
+    return true
+
+fn bool clear_override(string key):
+    await sqlite.exec("delete from settings where key = ?", key)
+    invalidate_config()
+    return true

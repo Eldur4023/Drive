@@ -1,0 +1,256 @@
+# Cliente HTTP y utilidades de las pruebas.
+#
+# Las pruebas son una aplicación Lux más: cada ruta /run/<escenario> ejecuta en
+# orden todas las comprobaciones de ese escenario contra una instancia de Drive
+# arrancada por tests/run.sh con su propia base de datos y configuración, y
+# devuelve el resultado en texto. Hablan con ella por HTTP (módulo http), con un
+# "cliente" que es un Json con su IP simulada (X-Forwarded-For), su bolsa de
+# cookies y, opcionalmente, un token de API.
+#
+# Limitación del módulo http: sigue siempre las redirecciones, así que no se
+# ve el 303 en sí, sólo la página final; las cookies sí se recogen de la
+# cabecera de la primera respuesta (ver needed.md).
+
+import http
+import json
+import os
+import hash
+import encoding
+import time
+import text
+import math
+import regex
+
+app:
+    port 8201
+
+fn bool is_dict(Json v):
+    try:
+        v.keys()
+        return true
+    catch e:
+        return false
+
+fn Json client(string ip):
+    return { "ip": ip, "cookies": {}, "bearer": null, "base": os.getenv("TEST_BASE", "http://127.0.0.1:8200") }
+
+# Nombre de usuario único: las pruebas de un escenario comparten base de datos.
+fn string uname(string base):
+    return base + str(state.incr("uname"))
+
+fn string cookie_header(Json c):
+    List<string> parts = []
+    for string k in c["cookies"]:
+        parts.add(k + "=" + c["cookies"][k])
+    return parts.join("; ")
+
+# Recoge la cookie que fija (o borra) una respuesta.
+fn bool absorb_cookies(Json c, Json r):
+    if not r["headers"].has("set-cookie"):
+        return false
+    List<string> segs = str(r["headers"]["set-cookie"]).split(";")
+    string nv = segs[0].trim()
+    int eq = nv.index_of("=")
+    if eq < 0:
+        return false
+    string name = nv.slice(0, eq)
+    string value = nv.slice(eq + 1)
+    bool expired = value == ""
+    for string s in segs:
+        if s.trim().lower() == "max-age=0":
+            expired = true
+    if expired:
+        c["cookies"].remove(name)
+    else:
+        c["cookies"][name] = value
+    return true
+
+# Una petición. `body`: null, un diccionario (formulario urlencoded) o un texto
+# (se envía tal cual: multipart ya montado). `extra`: cabeceras adicionales.
+fn Json call(Json c, string method, string path, Json body, Json extra):
+    Json headers = { "X-Forwarded-For": c["ip"] }
+    if len(c["cookies"]) > 0:
+        headers["Cookie"] = cookie_header(c)
+    if c["bearer"] != null:
+        headers["Authorization"] = "Bearer " + c["bearer"]
+    for string k in extra:
+        headers[k] = extra[k]
+    string url = c["base"] + path
+    Json r = null
+    if method == "GET":
+        r = await http.get(url, headers, { "timeout_ms": 60000 })
+    elif method == "DELETE":
+        r = await http.delete(url, headers, { "timeout_ms": 60000 })
+    else:
+        Json payload = body == null ? "" : body
+        Json opts = { "timeout_ms": 60000, "form": is_dict(payload) }
+        if method == "POST":
+            r = await http.post(url, payload, headers, opts)
+        elif method == "PATCH":
+            r = await http.patch(url, payload, headers, opts)
+        else:
+            r = await http.put(url, payload, headers, opts)
+    absorb_cookies(c, r)
+    r["text"] = is_dict(r["body"]) ? json.stringify(r["body"]) : str(r["body"])
+    return r
+
+fn Json get(Json c, string path):
+    return await call(c, "GET", path, null, {})
+
+fn Json post(Json c, string path, Json body):
+    return await call(c, "POST", path, body, {})
+
+# ── Multipart ───────────────────────────────────────────────────────────────
+
+# Cuerpo multipart con campos de texto y un único fichero.
+fn string multipart(Json fields, string field, string filename, string content):
+    string b = "----drivetest"
+    string out = ""
+    for string k in fields:
+        out = out + "--" + b + "\r\nContent-Disposition: form-data; name=\"" + k + "\"\r\n\r\n" + str(fields[k]) + "\r\n"
+    out = out + "--" + b + "\r\nContent-Disposition: form-data; name=\"" + field + "\"; filename=\"" + filename + "\"\r\nContent-Type: text/plain\r\n\r\n" + content + "\r\n--" + b + "--\r\n"
+    return out
+
+fn Json upload_file(Json c, string path, string field, string filename, string content, Json fields):
+    return await call(c, "POST", path, multipart(fields, field, filename, content), { "Content-Type": "multipart/form-data; boundary=----drivetest" })
+
+# Sube por la API y devuelve la respuesta (el cuerpo es el nodo).
+fn Json api_upload(Json c, string name, string content, string parent):
+    return await upload_file(c, "/api/files", "file", name, content, { "parent_id": parent })
+
+# ── Acciones habituales ─────────────────────────────────────────────────────
+
+fn Json register(Json c, string username, string password):
+    return await post(c, "/register", { "username": username, "email": username + "@example.com", "password": password, "password2": password })
+
+fn bool login(Json c, string username, string password):
+    c["cookies"].remove("drive_session")
+    Json r = await post(c, "/login", { "username": username, "password": password, "next": "/" })
+    return c["cookies"].has("drive_session")
+
+fn Json logout(Json c):
+    return await post(c, "/logout", null)
+
+# Cliente con la cuenta creada y la sesión abierta.
+fn Json user_client(string ip, string base, string password):
+    Json c = client(ip)
+    string name = uname(base)
+    await register(c, name, password)
+    await login(c, name, password)
+    c["name"] = name
+    return c
+
+# ── Comprobaciones ──────────────────────────────────────────────────────────
+
+fn Json new_results(string scenario):
+    return { "scenario": scenario, "pass": 0, "fail": 0, "failures": [], "log": [] }
+
+fn bool check(Json res, string name, bool cond, string detail):
+    if cond:
+        res["pass"] = res["pass"] + 1
+        res["log"].add("  ok   " + name)
+        return true
+    res["fail"] = res["fail"] + 1
+    res["failures"].add(name + ": " + detail)
+    res["log"].add("  FAIL " + name + " — " + detail)
+    return false
+
+fn string summary(Json res):
+    string out = "== " + res["scenario"] + " ==\n" + res["log"].join("\n") + "\n"
+    out = out + str(res["pass"]) + " ok, " + str(res["fail"]) + " fallos\n"
+    return out
+
+# Texto corto de una respuesta, para los mensajes de fallo.
+fn string brief(Json r):
+    string t = r["text"]
+    return "status " + str(r["status"]) + " " + t.slice(0, 160).replace("\n", " ")
+
+# Todos los ids de 32 hex que siguen a `prefix` en un texto.
+fn List<string> ids_after(string html, string prefix):
+    List<string> out = []
+    int at = 0
+    string rest = html
+    while true:
+        int i = rest.index_of(prefix)
+        if i < 0:
+            break
+        string tail = rest.slice(i + len(prefix))
+        out.add(tail.slice(0, 32))
+        rest = tail
+    return out
+
+# Texto entre dos marcas, o "".
+fn string between(string s, string a, string b):
+    int i = s.index_of(a)
+    if i < 0:
+        return ""
+    string tail = s.slice(i + len(a))
+    int j = tail.index_of(b)
+    return j < 0 ? "" : tail.slice(0, j)
+
+# ── TOTP (copia de lib/security.lux: aquí sirve para generar los códigos) ───
+
+fn int hex_value(string c):
+    return "0123456789abcdef".index_of(c.lower())
+
+fn string base32_to_hex(string secret):
+    string out = ""
+    long acc = 0
+    int bits = 0
+    for string ch in secret:
+        int v = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".index_of(ch.upper())
+        if v < 0:
+            continue
+        acc = acc * 32 + v
+        bits = bits + 5
+        if bits >= 8:
+            long divisor = 1
+            int s = 0
+            while s < bits - 8:
+                divisor = divisor * 2
+                s = s + 1
+            long byte_value = (acc - acc % divisor) / divisor
+            int hi = (byte_value - byte_value % 16) / 16
+            int lo = byte_value % 16
+            out = out + "0123456789abcdef".slice(hi, hi + 1) + "0123456789abcdef".slice(lo, lo + 1)
+            acc = acc % divisor
+            bits = bits - 8
+    return out
+
+# HOTP (RFC 4226) con clave en hexadecimal.
+fn string hotp_hex(string hexkey, long counter):
+    string hex_counter = ""
+    long cc = counter
+    int i = 0
+    while i < 16:
+        int r = cc % 16
+        hex_counter = "0123456789abcdef".slice(r, r + 1) + hex_counter
+        cc = (cc - r) / 16
+        i = i + 1
+    Json r = await os.run("openssl", ["dgst", "-sha1", "-mac", "HMAC", "-macopt", "hexkey:" + hexkey, "-binary"], { "input": encoding.hex_decode(hex_counter) })
+    string mac = encoding.hex_encode(r["stdout"])
+    int offset = hex_value(mac.slice(39, 40))
+    long code = 0
+    int j = 0
+    while j < 8:
+        code = code * 16 + hex_value(mac.slice(offset * 2 + j, offset * 2 + j + 1))
+        j = j + 1
+    return text.pad_left(str((code % 2147483648) % 1000000), 6, "0")
+
+fn string totp_now(string secret):
+    long now_s = time.now() / 1000
+    long step = (now_s - now_s % 30) / 30
+    return await hotp_hex(base32_to_hex(secret), step)
+
+# ── Órdenes de consola (lux run) ────────────────────────────────────────────
+
+# Ejecuta una orden de app/routes/commands.lux contra la misma base de datos y
+# configuración que la instancia de prueba. {"status", "stdout", "stderr"}.
+fn Json cli(List<string> args):
+    List<string> argv = ["run", os.getenv("TEST_APP", ""), "--"]
+    return await os.run(os.getenv("TEST_LUX", "lux"), argv + args, { "timeout_ms": 120000, "env": {
+        "DRIVE_DB": os.getenv("TEST_DB", ""),
+        "DRIVE_STORAGE__ROOT": os.getenv("TEST_BLOBS", ""),
+        "DRIVE_SECURITY__SECRET_KEY": os.getenv("TEST_SECRET", ""),
+        "DRIVE_CONFIG": os.getenv("TEST_CONFIG", "")
+    } })

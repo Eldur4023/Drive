@@ -1,0 +1,74 @@
+# IP real del cliente y evaluación de redes.
+#
+# Todo el modo "no me pidas usuario si estoy en casa" descansa sobre saber de
+# verdad desde qué IP llega la petición. Detrás de un proxy inverso hay que
+# leerla de X-Forwarded-For, pero esa cabecera la puede escribir cualquiera:
+# sólo se acepta cuando el salto inmediato es un proxy declarado en
+# server.trusted_proxies.
+
+# Dirección en texto sin corchetes, puerto ni prefijo de IPv4 mapeada; "" si no
+# es una IP válida.
+fn string parse_ip(string raw):
+    string v = raw.trim()
+    if v == "":
+        return ""
+    if v.starts_with("[") and v.contains("]"):
+        v = v.slice(1, v.index_of("]"))
+    if net.ip_version(v) == null:
+        return ""
+    return v
+
+# ¿Cae la IP en alguna de las redes (CIDR en texto)? Las entradas inválidas se
+# ignoran y una lista vacía no casa con nada.
+fn bool ip_in_nets(string ip, Json cidrs):
+    if ip == "" or cidrs == null or len(cidrs) == 0:
+        return false
+    for string c in cidrs:
+        try:
+            if net.ip_in(ip, c):
+                return true
+        catch e:
+            continue
+    return false
+
+# Para las redes de un enlace: una lista vacía significa "sin restricción".
+fn bool matches_any(string ip, Json cidrs):
+    if cidrs == null or len(cidrs) == 0:
+        return true
+    return ip_in_nets(ip, cidrs)
+
+# IP del salto inmediato.
+fn string peer_ip():
+    return parse_ip(request.ip)
+
+# IP real del cliente teniendo en cuenta los proxies de confianza.
+fn string client_ip(Json cf):
+    string peer = peer_ip()
+    if not cf["server.behind_proxy"]:
+        return peer
+    if not ip_in_nets(peer, cf["server.trusted_proxies"]):
+        # El salto inmediato no es un proxy nuestro: sus cabeceras no valen.
+        return peer
+
+    string forwarded = header("X-Forwarded-For", "")
+    if forwarded != "":
+        # "cliente, proxy1, proxy2": de derecha a izquierda, descartando los
+        # proxies conocidos; el primero desconocido es el cliente real (los
+        # anteriores pueden ser inventados por él).
+        List<string> parts = forwarded.split(",")
+        int i = len(parts) - 1
+        while i >= 0:
+            string candidate = parse_ip(parts[i])
+            if candidate != "" and not ip_in_nets(candidate, cf["server.trusted_proxies"]):
+                return candidate
+            i = i - 1
+        return peer
+
+    string real = parse_ip(header("X-Real-IP", ""))
+    return real == "" ? peer : real
+
+fn bool is_trusted_network(string ip, Json cf):
+    return ip_in_nets(ip, cf["network.trusted_networks"])
+
+fn bool is_denied_network(string ip, Json cf):
+    return ip_in_nets(ip, cf["network.denied_networks"])

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Iniciar sesión · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="card">
+    <h1>Iniciar sesión</h1>
+    <p class="muted">Accede a {{ c["app_name"] }} con tu cuenta.</p>
+
+    {% if c["trusted_network"] and c["cf"]["ui.show_trusted_network_hint"] %}
+      {% if c["cf"]["network.trusted_mode"] == "readonly" %}
+        <div class="notice ok">
+          Estás en una red de confianza: puedes
+          <a href="/browse">ver y descargar los ficheros compartidos</a> sin iniciar sesión.
+        </div>
+      {% elif c["cf"]["network.trusted_mode"] == "full" %}
+        <div class="notice ok">Estás en una red de confianza; el acceso es automático.</div>
+      {% endif %}
+    {% endif %}
+
+    <form method="post" action="/login">
+      <input type="hidden" name="next" value="{{ c["next"] }}">
+      <div class="field">
+        <label for="username">Usuario{% if c["cf"]["auth.allow_email_login"] %} o correo{% endif %}</label>
+        <input id="username" name="username" value="{{ c["username"] }}"
+               autocomplete="username" required autofocus style="width:100%">
+      </div>
+      <div class="field">
+        <label for="password">Contraseña</label>
+        <input id="password" name="password" type="password"
+               autocomplete="current-password" required style="width:100%">
+      </div>
+      <button class="primary" type="submit" style="width:100%">Entrar</button>
+    </form>
+
+    <p class="muted" style="margin-top:14px">
+      {% if c["needs_bootstrap"] %}
+        No hay ninguna cuenta todavía. <a href="/register">Crea la primera</a>; será administradora.
+      {% elif c["registration_open"] %}
+        ¿No tienes cuenta? <a href="/register">Regístrate</a>.
+      {% endif %}
+      <br><a href="/browse">Ver el contenido público</a>
+    </p>
+  </div>
+</div>
+{% endblock %}

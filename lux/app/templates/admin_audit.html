@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Auditoría · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+{% include "admin_nav.html" %}
+
+<div class="card">
+  <form method="get" action="/admin/audit" class="row">
+    <select name="event">
+      <option value="">Todos los eventos</option>
+      {% for name in c["events"] %}
+        <option value="{{ name }}" {% if c["event"] == name %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <input name="user" value="{{ c["user"] }}" placeholder="usuario">
+    <button class="primary" type="submit">Filtrar</button>
+  </form>
+
+  <div class="table-wrap" style="margin-top:14px">
+    <table>
+      <thead>
+        <tr><th>Cuándo</th><th>Evento</th><th>Usuario</th><th class="hide-sm">IP</th><th>Objetivo</th><th class="hide-sm">Detalle</th></tr>
+      </thead>
+      <tbody>
+        {% for row in c["rows"] %}
+        <tr>
+          <td class="muted">{{ row["at_h"] }}</td>
+          <td>{{ row["event"] }}</td>
+          <td>{{ row["who"] }}</td>
+          <td class="hide-sm mono muted">{{ row["ip_h"] }}</td>
+          <td class="muted">{{ row["target_h"] }}</td>
+          <td class="hide-sm muted">{{ row["detail"] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="row" style="margin-top:14px">
+    {% if c["page"] > 1 %}
+      <a class="button" href="/admin/audit?page={{ c["page"] - 1 }}&event={{ c["event"] }}&user={{ c["user"] }}">Anterior</a>
+    {% endif %}
+    <span class="muted">Página {{ c["page"] }}</span>
+    {% if len(c["rows"]) == 100 %}
+      <a class="button" href="/admin/audit?page={{ c["page"] + 1 }}&event={{ c["event"] }}&user={{ c["user"] }}">Siguiente</a>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

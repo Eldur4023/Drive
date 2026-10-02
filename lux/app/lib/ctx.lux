@@ -1,0 +1,260 @@
+# Contexto de las páginas y utilidades compartidas por las rutas.
+#
+# Las plantillas de Lux sólo ven lo que render() les pasa, y no pueden llamar a
+# funciones del proyecto: todo lo que se muestra con formato (fechas, tamaños,
+# iconos) se prepara aquí. Todas reciben un único diccionario `c`.
+
+fn string detail_for(int code):
+    switch code:
+        case 400:
+            return "La petición no es válida."
+        case 401:
+            return "Necesitas iniciar sesión."
+        case 403:
+            return "No tienes permiso suficiente sobre este elemento."
+        case 404:
+            return "No existe ese elemento."
+        case 410:
+            return "El contenido ya no está disponible."
+        case 413:
+            return "La subida supera el tamaño máximo que admite el servidor."
+        case 422:
+            return "La petición no es válida."
+        case 429:
+            return "Demasiadas peticiones. Espera un momento."
+        else:
+            return "Ha ocurrido un error. Inténtalo de nuevo."
+
+# Contexto común de toda página: aplicación, tema, usuario, qué puede hacer y
+# los avisos (?ok=...&error=...) que traen las redirecciones.
+fn Json ctx(Json cf, Json p, Json extra):
+    Json can = {}
+    for string a in ["upload", "delete", "share", "share_public", "admin", "settings"]:
+        can[a] = action_denied(p, a, cf) == ""
+
+    Json user = p["user"]
+    Json prefs = user == null ? {} : parse_json_text(user["preferences"], {})
+    string theme = prefs.has("theme") ? str(prefs["theme"]) : str(cf["ui.theme"])
+    Json c = {
+        "app_name": cf["app.name"],
+        "language": cf["app.language"],
+        "theme": theme,
+        "footer": cf["ui.footer_text"],
+        "cf": cf,
+        "auth": p_authenticated(p),
+        "kind": p["kind"],
+        "readonly": p["readonly"],
+        "trusted_network": p["trusted_network"],
+        "user_label": user == null ? "" : user_label(user),
+        "can": can,
+        "ok": query("ok", ""),
+        "error": query("error", ""),
+        "q": query("q", "")
+    }
+    return c.merge(extra)
+
+# Contexto de la página de error.
+fn Json ep(Json cf, Json p, int code, string detail):
+    return ctx(cf, p, { "code": code, "detail": detail == "" ? detail_for(code) : detail })
+
+# Contexto de una página con mensaje (message.html).
+fn Json mp(Json cf, Json p, string title, string message):
+    return ctx(cf, p, { "title": title, "message": message })
+
+# ── Nodos para mostrar ──────────────────────────────────────────────────────
+
+fn Json view_node(Json n, Json cf):
+    string tz = cf["app.timezone"]
+    Json v = {}.merge(n)
+    v["icon"] = icon_for(n)
+    v["size_h"] = n["is_dir"] == 1 ? "—" : format_size(n["size"])
+    v["updated_rel"] = fmt_rel(n["updated_at"], tz)
+    v["updated_h"] = fmt_date(n["updated_at"], tz)
+    v["created_h"] = fmt_date(n["created_at"], tz)
+    v["deleted_rel"] = fmt_rel(n["deleted_at"], tz)
+    v["href"] = n["is_dir"] == 1 ? "/files/" + n["id"] : "/files/" + n["id"] + "/detail"
+    v["is_image"] = n["mime_type"] != null and str(n["mime_type"]).starts_with("image/")
+    return v
+
+fn List<Json> view_nodes(List<Json> nodes, Json cf):
+    List<Json> out = []
+    for Json n in nodes:
+        out.add(view_node(n, cf))
+    return out
+
+# ── Autorización de rutas ───────────────────────────────────────────────────
+
+# Comprueba el permiso sobre un nodo (que puede ser null). {"status": 200 |
+# 404 | 403, "access": acceso}. A quien no tiene ningún acceso se le responde
+# 404 en lugar de 403: así la existencia de un fichero ajeno no se puede
+# confirmar sondeando ids.
+fn Json authorize(Json p, Json node, string needed, Json cf):
+    if node == null:
+        return { "status": 404, "access": null }
+    Json access = await resolve(p, node, cf)
+    if not access_granted(access):
+        return { "status": 404, "access": access }
+    if not access_allows(access, needed):
+        return { "status": 403, "access": access }
+    return { "status": 200, "access": access }
+
+# ── Descargas ───────────────────────────────────────────────────────────────
+
+# Todo lo necesario para servir el contenido de un fichero con send_file().
+# {"ok": false, "error": ...} si no es un fichero o su contenido no está.
+fn Json blob_meta(Json node, bool inline, Json cf):
+    if node["is_dir"] == 1 or node["blob_hash"] == null:
+        return { "ok": false, "error": "Esto no es un fichero." }
+    string path = blob_path(node["blob_hash"], cf)
+    if not os.is_file(path):
+        return { "ok": false, "error": "El contenido de este fichero no está disponible." }
+    string ctype = node["mime_type"] == null ? "application/octet-stream" : node["mime_type"]
+    # Evita que un HTML subido por un usuario se ejecute en el origen.
+    if inline and (ctype == "text/html" or ctype == "image/svg+xml" or ctype == "application/xhtml+xml"):
+        ctype = "text/plain; charset=utf-8"
+    return {
+        "ok": true,
+        "error": "",
+        "path": path,
+        "ctype": ctype
+    }
+
+# ── Sesión ──────────────────────────────────────────────────────────────────
+
+fn string session_cookie_name(Json cf):
+    return cf["security.session.cookie_name"]
+
+# ── API ─────────────────────────────────────────────────────────────────────
+
+fn Json node_json(Json n, Json access):
+    Json d = {
+        "id": n["id"],
+        "name": n["name"],
+        "is_dir": n["is_dir"] == 1,
+        "size": n["size"],
+        "mime_type": n["mime_type"],
+        "created_at": time.format_iso(n["created_at"]),
+        "updated_at": time.format_iso(n["updated_at"]),
+        "is_public": n["is_public"] == 1,
+        "lan_visible": n["lan_visible"] == 1,
+        "starred": n["starred"] == 1,
+        "trashed": n["deleted_at"] != null,
+        "parent_id": n["parent_id"],
+        "owner_id": n["owner_id"]
+    }
+    if access != null:
+        d["permission"] = access["permission"]
+        d["access_via"] = access["source"]
+    return d
+
+fn List<Json> nodes_json(List<Json> nodes):
+    List<Json> out = []
+    for Json n in nodes:
+        out.add(node_json(n, null))
+    return out
+
+# Los tokens de API sólo pueden lo que declaran sus ámbitos: "" si vale, o el
+# motivo del rechazo.
+fn string scope_denied(Json p, string scope):
+    if p["kind"] == "token" and not in_list(scope, p["scopes"]):
+        return "El token no tiene el ámbito '" + scope + "'."
+    return ""
+
+# ── Textos de ayuda ─────────────────────────────────────────────────────────
+
+fn string policy_hint(Json cf):
+    string s = "Mínimo " + str(cf["security.password_policy.min_length"]) + " caracteres"
+    if cf["security.password_policy.require_uppercase"]:
+        s = s + ", con mayúscula"
+    if cf["security.password_policy.require_digit"]:
+        s = s + ", con dígito"
+    if cf["security.password_policy.require_symbol"]:
+        s = s + ", con símbolo"
+    return s + "."
+
+# Orden de listado preferido por el usuario ("name" si no ha elegido ninguno).
+fn string pref_order(Json p):
+    if p["user"] == null:
+        return "name"
+    Json prefs = parse_json_text(p["user"]["preferences"], {})
+    return prefs.has("order") ? str(prefs["order"]) : "name"
+
+# Uso de espacio listo para mostrar.
+fn Json usage_view(Json usage):
+    return {
+        "used_h": format_size(usage["used"]),
+        "quota_h": format_size(usage["quota"]),
+        "unlimited": usage["unlimited"],
+        "percent": usage["percent"]
+    }
+
+# Texto que explica de dónde sale el acceso a un nodo.
+fn string access_source_text(string source):
+    switch source:
+        case "owner":
+            return "eres el propietario"
+        case "admin":
+            return "por ser administrador"
+        case "share":
+            return "compartido contigo"
+        case "public":
+            return "es público"
+        case "network":
+            return "por estar en la red de confianza"
+        case "link":
+            return "por un enlace"
+        else:
+            return ""
+
+# Redirección de vuelta a una carpeta con un aviso.
+fn string back_url(Json node, string ok, string err):
+    string path = node == null ? "/files" : "/files/" + node["id"]
+    return with_params(path, { "ok": ok, "error": err })
+
+# ── Cortes de petición (abort) ──────────────────────────────────────────────
+#
+# Cada una termina la petición desde donde se llame; el manejador `on error`
+# decide el formato (JSON bajo /api, HTML en el resto).
+
+# Principal autenticado, o redirección al login (páginas).
+fn Json need_login(Json cf):
+    Json p = await get_principal(cf)
+    if not p_authenticated(p):
+        abort(redirect(login_url(), 303))
+    return p
+
+# Principal autenticado, o 401 (API).
+fn Json need_api(Json cf):
+    Json p = await get_principal(cf)
+    if not p_authenticated(p):
+        abort(401, detail_for(401))
+    return p
+
+# Administrador con la acción global permitida ("admin" o "settings").
+fn Json need_admin(Json cf, string action):
+    Json p = await need_login(cf)
+    if not p_admin(p):
+        abort(403, "Se requiere ser administrador.")
+    allow(p, action, cf)
+    return p
+
+# 403 con el motivo si la acción global no está permitida.
+fn bool allow(Json p, string action, Json cf):
+    string why = action_denied(p, action, cf)
+    if why != "":
+        abort(403, why)
+    return true
+
+# 403 si un token de API no tiene el ámbito.
+fn bool require_scope(Json p, string scope):
+    string why = scope_denied(p, scope)
+    if why != "":
+        abort(403, why)
+    return true
+
+# Como authorize(), pero corta la petición (404 o 403) si no hay permiso.
+fn Json authz(Json p, Json node, string needed, Json cf):
+    Json a = await authorize(p, node, needed, cf)
+    if a["status"] != 200:
+        abort(a["status"], detail_for(a["status"]))
+    return a

@@ -1,0 +1,202 @@
+# Utilidades de texto, tiempo y presentación.
+#
+# Las marcas de tiempo son enteros: milisegundos desde la época Unix, en UTC.
+# La zona horaria sólo interviene al formatear para mostrar.
+
+fn string new_id():
+    return hash.uuid().replace("-", "")
+
+fn bool truthy(string v):
+    string s = v.trim().lower()
+    return s == "1" or s == "true" or s == "on" or s == "yes" or s == "si" or s == "sí"
+
+# ── Tamaños y duraciones ────────────────────────────────────────────────────
+
+# "2GB" -> 2147483648. Devuelve {"ok": bool, "v": int?, "err": string}.
+fn Json parse_size(string raw):
+    string s = raw.trim().lower().replace(" ", "")
+    Json g = regex.groups("^([0-9.]+)([a-z]*)$", s)
+    if g == null:
+        return { "ok": false, "v": null, "err": "tamaño no reconocido: " + raw }
+    string unit = g[2] == "" ? "b" : g[2]
+    Json units = { "b": 1, "kb": 1024, "mb": 1048576, "gb": 1073741824, "tb": 1099511627776 }
+    if not units.has(unit):
+        return { "ok": false, "v": null, "err": "unidad de tamaño desconocida: " + unit }
+    try:
+        return { "ok": true, "v": int(float(g[1]) * units[unit]), "err": "" }
+    catch e:
+        return { "ok": false, "v": null, "err": "tamaño no reconocido: " + raw }
+
+# "30d" -> 2592000 segundos.
+fn Json parse_duration(string raw):
+    string s = raw.trim().lower().replace(" ", "")
+    Json g = regex.groups("^([0-9.]+)([a-z]*)$", s)
+    if g == null:
+        return { "ok": false, "v": null, "err": "duración no reconocida: " + raw }
+    string unit = g[2] == "" ? "s" : g[2]
+    Json units = { "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800 }
+    if not units.has(unit):
+        return { "ok": false, "v": null, "err": "unidad de duración desconocida: " + unit }
+    try:
+        return { "ok": true, "v": int(float(g[1]) * units[unit]), "err": "" }
+    catch e:
+        return { "ok": false, "v": null, "err": "duración no reconocida: " + raw }
+
+fn string format_size(Json num):
+    if num == null:
+        return "sin límite"
+    double value = float(num)
+    List<string> units = ["B", "KB", "MB", "GB", "TB"]
+    int i = 0
+    while value >= 1024.0 and i < 4:
+        value = value / 1024.0
+        i = i + 1
+    if i == 0:
+        return text.format_number(value, 0, "", ".") + " B"
+    return text.format_number(value, 1, "", ".") + " " + units[i]
+
+# Duración en segundos como la escribe un humano: 90000 -> "1d".
+fn string humanize_duration(Json seconds):
+    int s = int(seconds)
+    if s >= 86400 and s % 86400 == 0:
+        return str(s / 86400) + "d"
+    if s >= 3600 and s % 3600 == 0:
+        return str(s / 3600) + "h"
+    if s >= 60 and s % 60 == 0:
+        return str(s / 60) + "m"
+    return str(s) + "s"
+
+fn string fmt_duration(Json seconds):
+    if seconds == null or seconds == 0:
+        return "sin caducidad"
+    int s = int(seconds)
+    if s >= 86400:
+        int v = s / 86400
+        return str(v) + (v == 1 ? " día" : " días")
+    if s >= 3600:
+        int v = s / 3600
+        return str(v) + (v == 1 ? " hora" : " horas")
+    if s >= 60:
+        int v = s / 60
+        return str(v) + (v == 1 ? " minuto" : " minutos")
+    return str(s) + " s"
+
+# ── Fechas ──────────────────────────────────────────────────────────────────
+
+fn string fmt_dt(Json ms, string tz, string fmt):
+    if ms == null:
+        return "—"
+    return time.format(int(ms), fmt, tz)
+
+fn string fmt_date(Json ms, string tz):
+    return fmt_dt(ms, tz, "%d/%m/%Y %H:%M")
+
+# Fechas cercanas en lenguaje natural; el resto, en formato corto.
+fn string fmt_rel(Json ms, string tz):
+    if ms == null:
+        return "—"
+    int seconds = (time.now() - int(ms)) / 1000
+    if seconds < 60:
+        return "hace un momento"
+    if seconds < 3600:
+        return "hace " + str(seconds / 60) + " min"
+    if seconds < 86400:
+        return "hace " + str(seconds / 3600) + " h"
+    if seconds < 7 * 86400:
+        return "hace " + str(seconds / 86400) + " d"
+    return fmt_dt(ms, tz, "%d/%m/%Y")
+
+# ── Ficheros ────────────────────────────────────────────────────────────────
+
+fn string icon_for(Json node):
+    if node["is_dir"] == 1:
+        return "📁"
+    string mime = node["mime_type"] == null ? "" : node["mime_type"]
+    if mime.starts_with("image/"):
+        return "🖼️"
+    if mime.starts_with("video/"):
+        return "🎬"
+    if mime.starts_with("audio/"):
+        return "🎵"
+    if mime.starts_with("text/") or mime == "application/json" or mime == "application/xml":
+        return "📄"
+    if mime.contains("pdf"):
+        return "📕"
+    for string k in ["zip", "compressed", "tar", "rar", "7z"]:
+        if mime.contains(k):
+            return "🗜️"
+    for string k in ["sheet", "excel", "csv"]:
+        if mime.contains(k):
+            return "📊"
+    for string k in ["word", "document"]:
+        if mime.contains(k):
+            return "📝"
+    return "📦"
+
+# Tipo MIME de un nombre de fichero, sin el parámetro charset.
+fn string guess_mime(string name):
+    return os.mime(name).split(";")[0].trim()
+
+# Extensión en minúsculas con su punto, o "" si no tiene.
+fn string ext_of(string name):
+    List<string> parts = name.split(".")
+    if len(parts) < 2:
+        return ""
+    return "." + parts[len(parts) - 1].lower()
+
+# Deja un nombre presentable y sin separadores de ruta. No protege el sistema
+# de ficheros —los blobs ya son opacos— pero evita nombres que confundirían
+# al descargar (../, saltos de línea, nulos).
+fn string sanitize_name(string raw):
+    string name = raw.replace("\\", "/")
+    List<string> parts = name.split("/")
+    name = parts[len(parts) - 1]
+    for string bad in ["\r", "\n", "\t", "\0"]:
+        name = name.replace(bad, "")
+    name = name.trim()
+    while name.starts_with("."):
+        name = name.slice(1)
+    while name.ends_with("."):
+        name = name.slice(0, len(name) - 1)
+    if name == "":
+        return "sin-nombre"
+    return name.slice(0, 255)
+
+# ── URLs ────────────────────────────────────────────────────────────────────
+
+# Ruta con parámetros; los vacíos se omiten.
+fn string with_params(string path, Json params):
+    Json clean = {}
+    for string k in params:
+        if params[k] != null and str(params[k]) != "":
+            clean[k] = params[k]
+    if len(clean) == 0:
+        return path
+    return path + "?" + encoding.query_encode(clean)
+
+# Evita redirecciones abiertas: sólo se aceptan rutas internas.
+fn string safe_next(string target):
+    if target == "" or not target.starts_with("/") or target.starts_with("//") or target.starts_with("/\\"):
+        return "/"
+    return target
+
+fn string login_url():
+    string target = request.query == "" ? request.path : request.path + "?" + request.query
+    return "/login?next=" + encoding.url_encode(target)
+
+# ── Varios ──────────────────────────────────────────────────────────────────
+
+fn bool in_list(string v, Json items):
+    if items == null:
+        return false
+    for string x in items:
+        if x == v:
+            return true
+    return false
+
+# Entero de un campo de formulario; `fallback` si falta o no es un número.
+fn int form_int(string name, int fallback):
+    try:
+        return int(form(name, str(fallback)).trim())
+    catch e:
+        return fallback

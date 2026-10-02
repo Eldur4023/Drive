@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Error {{ code }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="card">
+    <h1>Error {{ code }}</h1>
+    <p>{{ detail }}</p>
+    <p class="row">
+      <a class="button" href="/">Inicio</a>
+      <a class="button" href="/browse">Contenido público</a>
+    </p>
+  </div>
+</div>
+{% endblock %}

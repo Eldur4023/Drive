@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}{{ c["current_id"] == "" ? "Mis ficheros" : c["current_name"] }} · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/files">Mis ficheros</a>
+  {% for crumb in c["breadcrumbs"] %}
+    <span class="sep">/</span><a href="/files/{{ crumb["id"] }}">{{ crumb["name"] }}</a>
+  {% endfor %}
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Subir ficheros</h2>
+    {% if c["can"]["upload"] %}
+      <form method="post" action="/files/upload" enctype="multipart/form-data">
+        <input type="hidden" name="parent_id" value="{{ c["current_id"] }}">
+        <div class="dropzone" data-dropzone>
+          <input type="file" name="files" multiple>
+          <p class="muted">Arrastra ficheros aquí o pulsa para elegirlos.</p>
+        </div>
+        <div class="field inline" style="margin-top:10px">
+          <input type="checkbox" id="overwrite" name="overwrite" value="true">
+          <label for="overwrite">Sobrescribir si ya existe (guarda la versión anterior)</label>
+        </div>
+        <button class="primary" type="submit">Subir</button>
+      </form>
+    {% else %}
+      <p class="muted">Tu perfil actual no permite subir ficheros.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Espacio y carpetas</h2>
+    <p class="spread">
+      <span>{{ c["usage"]["used_h"] }} usados{% if not c["usage"]["unlimited"] %} de {{ c["usage"]["quota_h"] }}{% endif %}</span>
+      <span class="muted">{{ c["usage"]["percent"] }}%</span>
+    </p>
+    <div class="meter {% if c["usage"]["percent"] > 90 %}full{% endif %}"><span style="width: {{ c["usage"]["percent"] }}%"></span></div>
+
+    {% if c["can"]["upload"] %}
+      <form method="post" action="/files/mkdir" class="row" style="margin-top:16px">
+        <input type="hidden" name="parent_id" value="{{ c["current_id"] }}">
+        <input name="name" placeholder="Nueva carpeta" required>
+        <button type="submit">Crear</button>
+      </form>
+    {% endif %}
+    <p class="muted" style="margin-top:12px">
+      {{ c["shared_count"] }} elemento(s) compartidos contigo · <a href="/shared">ver</a>
+    </p>
+  </div>
+</div>
+
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">{{ c["current_id"] == "" ? "Raíz" : c["current_name"] }}</h2>
+    <form method="get" class="row">
+      <label for="order" style="margin:0">Ordenar</label>
+      <select id="order" name="order" onchange="this.form.submit()">
+        <option value="name" {% if c["order"] == "name" %}selected{% endif %}>Nombre</option>
+        <option value="size" {% if c["order"] == "size" %}selected{% endif %}>Tamaño</option>
+        <option value="modified" {% if c["order"] == "modified" %}selected{% endif %}>Modificación</option>
+        <option value="created" {% if c["order"] == "created" %}selected{% endif %}>Creación</option>
+      </select>
+    </form>
+  </div>
+
+  {% if len(c["items"]) == 0 %}
+    <p class="muted">Esta carpeta está vacía.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Nombre</th>
+          <th class="hide-sm">Tamaño</th>
+          <th class="hide-sm">Modificado</th>
+          <th class="right">Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for item in c["items"] %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item["icon"] }}</span>
+              <a href="{{ item["href"] }}">{{ item["name"] }}</a>
+              {% if item["is_public"] == 1 %}<span class="tag public">público</span>{% endif %}
+              {% if item["lan_visible"] == 1 %}<span class="tag lan">red local</span>{% endif %}
+              {% if item["starred"] == 1 %}<span title="Destacado">★</span>{% endif %}
+            </div>
+          </td>
+          <td class="hide-sm">{{ item["size_h"] }}</td>
+          <td class="hide-sm muted">{{ item["updated_rel"] }}</td>
+          <td class="right">
+            {% if item["is_dir"] != 1 %}
+              <a class="button small" href="/files/{{ item["id"] }}/download">Descargar</a>
+            {% endif %}
+            <a class="button small" href="/files/{{ item["id"] }}/detail">Detalles</a>
+            {% if c["can"]["delete"] %}
+              <form class="inline" method="post" action="/files/{{ item["id"] }}/trash"
+                    data-confirm="¿Enviar «{{ item["name"] }}» a la papelera?">
+                <button class="small danger" type="submit">Borrar</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,272 @@
+# Quién puede hacer qué.
+#
+# Hay cinco maneras distintas de llegar a un fichero y todas confluyen aquí:
+#
+#   * siendo su propietario,
+#   * teniéndolo compartido con tu cuenta (directamente o por una carpeta padre),
+#   * porque está marcado como público,
+#   * porque llegas por un enlace con token,
+#   * porque entras desde una red de confianza y la política lo permite.
+#
+# resolve() devuelve el permiso efectivo y de dónde sale, de forma que la
+# interfaz pueda explicárselo al usuario en lugar de limitarse a un 403.
+#
+# Un "principal" es un Json con: kind ("user" | "anonymous" | "network" |
+# "link" | "token"), user (fila de users o null), session_id, ip, denied,
+# trusted_network, link (fila de share_links o null), scopes (lista) y
+# readonly. Un "acceso" es {"permission": "read"|"write"|"owner"|null,
+# "source": ..., "via": nodo|null}.
+
+# ── Identidad ───────────────────────────────────────────────────────────────
+
+fn bool p_authenticated(Json p):
+    return p["user"] != null and (p["kind"] == "user" or p["kind"] == "token" or p["kind"] == "network")
+
+fn bool p_admin(Json p):
+    return p["user"] != null and p["user"]["role"] == "admin"
+
+fn Json p_user_id(Json p):
+    return p["user"] == null ? null : p["user"]["id"]
+
+fn string principal_label(Json p):
+    if p["user"] != null:
+        return user_label(p["user"])
+    if p["kind"] == "link":
+        return "enlace compartido"
+    if p["trusted_network"]:
+        return "red local"
+    return "anónimo"
+
+# ── Capacidades por perfil ──────────────────────────────────────────────────
+
+# Evalúa una capacidad del perfil (can_upload, can_share_public...). Orden de
+# resolución: override individual del usuario > perfil del rol.
+fn bool capability(Json p, string name, Json cf):
+    Json user = p["user"]
+    if user == null:
+        return false
+    Json overrides = parse_json_text(user["permission_overrides"], {})
+    if overrides.has(name):
+        return overrides[name] ? true : false
+    Json role = role_profile(cf, user["role"])
+    return role[name] ? true : false
+
+# Comprueba una acción global. Devuelve el motivo del "no", o "" si se permite.
+# Aquí se aplican las restricciones que no dependen de un fichero concreto: el
+# perfil del rol, el modo de sólo lectura y la lista network.require_login_for.
+fn string action_denied(Json p, string action, Json cf):
+    # Un acceso entrado por red de confianza sin login real no puede hacer las
+    # acciones que la configuración reserve a usuarios identificados.
+    if p["kind"] == "network" and in_list(action, cf["network.require_login_for"]):
+        return "Esta acción requiere iniciar sesión, aunque estés en la red local."
+    if p["readonly"] and in_list(action, ["upload", "delete", "share", "settings", "admin"]):
+        return "Tu acceso actual es de sólo lectura."
+    if (action == "admin" or action == "settings") and not p_authenticated(p):
+        return "Necesitas iniciar sesión."
+
+    string cap = ""
+    switch action:
+        case "upload":
+            cap = "can_upload"
+        case "delete":
+            cap = "can_delete"
+        case "share":
+            cap = "can_share_internal"
+        case "share_public":
+            cap = "can_share_public"
+        case "admin":
+            cap = "can_manage_users"
+        case "settings":
+            cap = "can_edit_settings"
+        else:
+            cap = ""
+    if cap != "" and p["user"] != null and not capability(p, cap, cf):
+        return "Tu perfil no permite esta acción."
+
+    if action == "share" and not cf["sharing.internal_enabled"]:
+        return "La compartición entre usuarios está desactivada."
+    if action == "share_public":
+        if not cf["sharing.public_links_enabled"]:
+            return "Los enlaces públicos están desactivados."
+        string role = p["user"] == null ? "" : p["user"]["role"]
+        if not in_list(role, cf["sharing.public_links_roles"]):
+            return "Tu rol no puede crear enlaces públicos."
+    return ""
+
+# ── Árbol ───────────────────────────────────────────────────────────────────
+
+# El nodo y sus ancestros, del más cercano a la raíz. Un tope de 64 niveles
+# evita quedarse colgado si una incidencia de datos crea un ciclo padre-hijo.
+fn List<Json> chain(Json node):
+    List<Json> rows = await sqlite.query("""
+        with recursive lineage(id, parent_id, depth) as (
+            select id, parent_id, 0 from nodes where id = ?
+            union all
+            select n.id, n.parent_id, l.depth + 1
+            from nodes n join lineage l on n.id = l.parent_id
+            where l.depth < 64
+        )
+        select n.*, l.depth as depth from lineage l join nodes n on n.id = l.id order by l.depth
+        """, node["id"])
+    List<Json> result = []
+    List<string> seen = []
+    for Json r in rows:
+        if seen.contains(r["id"]):
+            break
+        seen.add(r["id"])
+        result.add(r)
+    return result
+
+# Ruta desde la raíz hasta el nodo, para las migas de pan.
+fn List<Json> path_of(Json node):
+    List<Json> up = await chain(node)
+    up.reverse()
+    return up
+
+fn bool is_descendant(Json node, string ancestor_id):
+    for Json n in await chain(node):
+        if n["id"] == ancestor_id:
+            return true
+    return false
+
+# ── Resolución de acceso ────────────────────────────────────────────────────
+
+fn int perm_rank(Json permission):
+    if permission == "read":
+        return 1
+    if permission == "write":
+        return 2
+    if permission == "owner":
+        return 3
+    return 0
+
+fn Json make_access(Json permission, string source, Json via):
+    return { "permission": permission, "source": source, "via": via }
+
+fn bool access_granted(Json a):
+    return a["permission"] != null
+
+fn bool access_allows(Json a, string needed):
+    return perm_rank(a["permission"]) >= perm_rank(needed)
+
+# Mejor permiso compartido con un usuario sobre una cadena de nodos:
+# {"permission", "node_id"} o null.
+fn Json share_for(string user_id, List<Json> lineage):
+    List<string> ids = []
+    for Json n in lineage:
+        ids.add(n["id"])
+    List<Json> rows = await sqlite.query("select * from shares where user_id = ? and node_id in (?)", user_id, ids)
+    Json best = null
+    long now = time.now()
+    for Json s in rows:
+        if s["expires_at"] != null and s["expires_at"] <= now:
+            continue
+        if best == null or perm_rank(s["permission"]) > perm_rank(best["permission"]):
+            best = { "permission": s["permission"], "node_id": s["node_id"] }
+    return best
+
+fn Json node_in(List<Json> lineage, Json id):
+    for Json n in lineage:
+        if n["id"] == id:
+            return n
+    return null
+
+fn Json trusted_user_id(Json cf):
+    if not cf["network.trusted_user"]:
+        return null
+    Json user = await get_user_by_name(str(cf["network.trusted_user"]))
+    return user == null ? null : user["id"]
+
+# Acceso concedido por estar en una red de confianza, o null.
+fn Json network_access(List<Json> lineage, Json cf):
+    string scope = cf["network.trusted_scope"]
+    Json tuid = await trusted_user_id(cf)
+
+    if scope == "public":
+        # Lo público ya se ha resuelto antes; la red no añade nada.
+        return null
+
+    if scope == "shared":
+        for Json candidate in lineage:
+            if candidate["lan_visible"] == 1:
+                return make_access("read", "network", candidate)
+        if tuid != null:
+            Json shared = await share_for(tuid, lineage)
+            if shared != null:
+                string permission = cf["network.trusted_mode"] == "readonly" ? "read" : shared["permission"]
+                return make_access(permission, "network", node_in(lineage, shared["node_id"]))
+        return null
+
+    if scope == "trusted_user" and tuid != null:
+        for Json n in lineage:
+            if n["owner_id"] == tuid:
+                string permission = cf["network.trusted_mode"] == "readonly" ? "read" : "owner"
+                return make_access(permission, "network", lineage[len(lineage) - 1])
+    return null
+
+# Permiso efectivo de `p` sobre `node`.
+fn Json resolve(Json p, Json node, Json cf):
+    List<Json> lineage = await chain(node)
+
+    # Un elemento en la papelera sólo lo ve su dueño (y los administradores),
+    # aunque estuviera compartido o fuera público antes de borrarse.
+    bool trashed = false
+    for Json n in lineage:
+        if n["deleted_at"] != null:
+            trashed = true
+
+    # 1. Propietario.
+    if p["user"] != null and node["owner_id"] == p["user"]["id"]:
+        return make_access("owner", "owner", node)
+
+    # 2. Administrador: acceso total, también a la papelera ajena.
+    if p_admin(p):
+        return make_access("owner", "admin", node)
+
+    if trashed:
+        return make_access(null, "none", null)
+
+    # 3. Enlace con token.
+    if p["link"] != null and node_in(lineage, p["link"]["node_id"]) != null:
+        Json link = p["link"]
+        Json target = node_in(lineage, link["node_id"])
+        # Un enlace a una carpeta sin listado sólo sirve para esa carpeta.
+        if link["allow_listing"] != 1 and node["id"] != link["node_id"]:
+            return make_access(null, "none", null)
+        string perm = (link["mode"] == "upload" or link["mode"] == "both") ? "write" : "read"
+        return make_access(perm, "link", target)
+
+    # 4. Compartido con la cuenta, directamente o por herencia.
+    if p["user"] != null:
+        Json shared = await share_for(p["user"]["id"], lineage)
+        if shared != null:
+            return make_access(shared["permission"], "share", node_in(lineage, shared["node_id"]))
+
+    # 5. Público: cualquiera, con o sin cuenta.
+    for Json candidate in lineage:
+        if candidate["is_public"] == 1:
+            return make_access("read", "public", candidate)
+
+    # 6. Red de confianza.
+    if p["trusted_network"] and cf["network.trusted_mode"] != "none":
+        Json access = await network_access(lineage, cf)
+        if access != null:
+            return access
+
+    return make_access(null, "none", null)
+
+# ── Estado de un enlace ─────────────────────────────────────────────────────
+
+# Comprueba caducidad, revocación, límite de descargas y red permitida.
+# Devuelve el motivo del "no", o "" si se puede usar.
+fn string link_unusable(Json link, string ip):
+    if link["revoked"] == 1:
+        return "Este enlace ha sido revocado."
+    if link["expires_at"] != null and link["expires_at"] <= time.now():
+        return "Este enlace ha caducado."
+    if link["download_limit"] != null and link["download_count"] >= link["download_limit"]:
+        return "Este enlace ha alcanzado su límite de descargas."
+    Json nets = parse_json_text(link["allowed_networks"], [])
+    if len(nets) > 0 and not matches_any(ip, nets):
+        return "Este enlace no está disponible desde tu red."
+    return ""

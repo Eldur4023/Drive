@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Compartidos conmigo · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>Compartidos conmigo</h2>
+  {% if len(c["items"]) == 0 %}
+    <p class="muted">Todavía no han compartido nada contigo.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Nombre</th><th>Propietario</th><th class="hide-sm">Tamaño</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for item in c["items"] %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item["icon"] }}</span>
+              <a href="{{ item["href"] }}">{{ item["name"] }}</a>
+            </div>
+          </td>
+          <td>{{ item["owner_label"] }}</td>
+          <td class="hide-sm">{{ item["size_h"] }}</td>
+          <td class="right">
+            {% if item["is_dir"] != 1 %}
+              <a class="button small" href="/files/{{ item["id"] }}/download">Descargar</a>
+            {% endif %}
+            <a class="button small" href="/files/{{ item["id"] }}/detail">Detalles</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

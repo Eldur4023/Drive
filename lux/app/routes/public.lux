@@ -1,0 +1,224 @@
+# Acceso sin cuenta: ficheros públicos, red local y enlaces con token.
+
+fn string availability_text(string source):
+    if source == "public":
+        return "Disponible porque su propietario lo ha marcado como público."
+    if source == "network":
+        return "Disponible porque estás en una red de confianza."
+    return "Disponible."
+
+group(""):
+    require await gate_ok() else text("Acceso no permitido desde tu red.").status(403)
+
+    # ── Vista pública general ───────────────────────────────────────────────
+
+    # Índice de lo accesible sin iniciar sesión desde esta red.
+    get endpoint("/browse", string node_id = ""):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+
+        if node_id != "":
+            Json node = await get_node(node_id)
+            Json access = node == null ? make_access(null, "none", null) : await resolve(p, node, cf)
+            if not (access_granted(access)):
+                abort(404, "No existe ese elemento.")
+            if node["is_dir"] != 1:
+                return redirect("/p/" + node["id"], 303)
+            List<Json> shown = []
+            for Json child in await children_of(node["owner_id"], node["id"], "name"):
+                if access_granted(await resolve(p, child, cf)):
+                    shown.add(child)
+            return render("public_browse.html", c=ctx(cf, p, {
+                "current_id": node["id"],
+                "current_name": node["name"],
+                "items": view_nodes(shown, cf),
+                "breadcrumbs": await path_of(node)
+            }))
+
+        # Raíz: lo marcado como público y, si la red es de confianza, lo que la
+        # política de red abra además.
+        List<Json> roots = await sqlite.query("select * from nodes where is_public = 1 and deleted_at is null")
+        if p["trusted_network"] and cf["network.trusted_mode"] != "none":
+            List<string> have = []
+            for Json n in roots:
+                have.add(n["id"])
+            for Json n in await sqlite.query("select * from nodes where lan_visible = 1 and deleted_at is null"):
+                if not have.contains(n["id"]):
+                    roots.add(n)
+            if cf["network.trusted_scope"] == "trusted_user" and cf["network.trusted_user"]:
+                Json owner = await get_user_by_name(str(cf["network.trusted_user"]))
+                if owner != null:
+                    for Json n in await children_of(owner["id"], null, "name"):
+                        roots.add(n)
+
+        # Se ocultan los nodos que ya cuelgan de otro que también se muestra.
+        List<string> ids = []
+        for Json n in roots:
+            ids.add(n["id"])
+        List<Json> top = []
+        for Json n in roots:
+            if n["parent_id"] == null or not ids.contains(n["parent_id"]):
+                top.add(n)
+        return render("public_browse.html", c=ctx(cf, p, {
+            "current_id": "",
+            "current_name": "",
+            "items": view_nodes(top, cf),
+            "breadcrumbs": []
+        }))
+
+    get endpoint("/p/:node_id", string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json node = await get_node(node_id)
+        Json access = node == null ? make_access(null, "none", null) : await resolve(p, node, cf)
+        if not (access_granted(access)):
+            abort(404, "No existe ese elemento.")
+        if node["is_dir"] == 1:
+            return redirect("/browse?node_id=" + node["id"], 303)
+        return render("public_file.html", c=ctx(cf, p, {
+            "node": view_node(node, cf),
+            "type_text": node["mime_type"] == null ? "tipo desconocido" : node["mime_type"],
+            "availability": availability_text(access["source"])
+        }))
+
+    get endpoint("/p/:node_id/download", string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+        Json rl = rate_check(cf, "download", p["ip"], p["ip"])
+        if not rl["ok"]:
+            abort(status(429, "Demasiadas descargas seguidas.").header("Retry-After", str(rl["retry"])))
+        Json meta = blob_meta(node, false, cf)
+        if not (meta["ok"]):
+            abort(404, meta["error"])
+        await audit_record(cf, "download", p, "node", node["id"], { "name": node["name"], "via": "public" })
+        return send_file(meta["path"], { "filename": node["name"], "inline": false }).header("Content-Type", meta["ctype"]).header("Cache-Control", "private, max-age=86400")
+
+    # ── Enlaces con token ───────────────────────────────────────────────────
+
+    get endpoint("/s/:token", string token, string node_id = ""):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json loaded = await load_link(token, p)
+        if loaded["code"] != 200:
+            abort(loaded["code"], loaded["reason"])
+        Json link = loaded["link"]
+        Json anon = new_principal(p["ip"], p["trusted_network"])
+
+        if not link_unlocked(link, cf):
+            return render("link_password.html", c=ctx(cf, anon, { "token": token }))
+
+        Json root = loaded["node"]
+        Json node = root
+        if node_id != "":
+            node = await get_node(node_id)
+            Json access = node == null ? make_access(null, "none", null) : await resolve(link_principal(p, link), node, cf)
+            if not (access_granted(access)):
+                abort(404, "No existe ese elemento.")
+
+        List<Json> items = []
+        if node["is_dir"] == 1 and link["allow_listing"] == 1:
+            items = await children_of(node["owner_id"], node["id"], "name")
+
+        await audit_record(cf, "share_access", p, "link", link["id"], { "node": node["id"] })
+
+        # Migas de pan desde la raíz del enlace: lo que hay por encima no se
+        # enseña a quien llega por él.
+        List<Json> crumbs = []
+        bool inside = false
+        for Json n in await path_of(node):
+            if n["id"] == root["id"]:
+                inside = true
+            if inside:
+                crumbs.add(n)
+
+        return render("link.html", c=ctx(cf, anon, {
+            "link": link,
+            "node": view_node(node, cf),
+            "items": view_nodes(items, cf),
+            "can_upload": link["mode"] == "upload" or link["mode"] == "both",
+            "can_download": link["mode"] == "download" or link["mode"] == "both",
+            "breadcrumbs": crumbs,
+            "expires_h": link["expires_at"] == null ? "" : fmt_date(link["expires_at"], cf["app.timezone"])
+        }))
+
+    post endpoint("/s/:token", string token):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json loaded = await load_link(token, p)
+        if loaded["code"] != 200:
+            abort(loaded["code"], loaded["reason"])
+        Json link = loaded["link"]
+        Json anon = new_principal(p["ip"], p["trusted_network"])
+
+        Json rl = rate_check(cf, "login", "link:" + token, p["ip"])
+        if not rl["ok"]:
+            return render("link_password.html", c=ctx(cf, anon, { "token": token, "error": "Demasiados intentos. Espera " + str(rl["retry"]) + " segundos." })).status(429)
+
+        if not await check_link_password(link, form("password", "")):
+            return render("link_password.html", c=ctx(cf, anon, { "token": token, "error": "Contraseña incorrecta." })).status(401)
+
+        return redirect("/s/" + token, 303).cookie("drive_links", unlock_cookie_value(cf, token), max_age=86400, secure=cf["security.session.cookie_secure"], same_site=cf["security.session.cookie_samesite"])
+
+    get endpoint("/s/:token/download/:node_id", string token, string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json loaded = await load_link(token, p)
+        if loaded["code"] != 200:
+            abort(loaded["code"], loaded["reason"])
+        Json link = loaded["link"]
+        require link_unlocked(link, cf) else redirect("/s/" + token, 303)
+        if not (link["mode"] != "upload"):
+            abort(403, "Este enlace sólo admite subidas.")
+
+        Json node = await get_node(node_id)
+        Json lp = link_principal(p, link)
+        Json access = node == null ? make_access(null, "none", null) : await resolve(lp, node, cf)
+        if not (access_granted(access)):
+            abort(404, "No existe ese elemento.")
+        Json meta = blob_meta(node, false, cf)
+        if not (meta["ok"]):
+            abort(404, meta["error"])
+
+        await register_download(link["id"])
+        await audit_record(cf, "download", lp, "node", node["id"], { "via": "link", "token": token })
+        return send_file(meta["path"], { "filename": node["name"], "inline": false }).header("Content-Type", meta["ctype"]).header("Cache-Control", "private, max-age=86400")
+
+    # Buzón: un visitante deja ficheros sin necesidad de cuenta.
+    post endpoint("/s/:token/upload", string token, List<File> files, string node_id = ""):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json loaded = await load_link(token, p)
+        if loaded["code"] != 200:
+            abort(loaded["code"], loaded["reason"])
+        Json link = loaded["link"]
+        require link_unlocked(link, cf) else redirect("/s/" + token, 303)
+        if not (link["mode"] == "upload" or link["mode"] == "both"):
+            abort(403, "Este enlace no admite subidas.")
+
+        Json target = node_id == "" ? loaded["node"] : await get_node(node_id)
+        if not (target != null and target["is_dir"] == 1):
+            abort(400, "El destino no es una carpeta.")
+        Json access = await resolve(link_principal(p, link), target, cf)
+        if not (access_allows(access, "write")):
+            abort(403, "No puedes subir aquí.")
+        Json owner = await get_user(target["owner_id"])
+        if not (owner != null):
+            abort(410, "El destino ya no existe.")
+
+        int saved = 0
+        List<string> errors = []
+        for File f in files:
+            if f.filename == "":
+                continue
+            await sqlite.begin()
+            Json r = await save_upload(owner, target, f.filename, f, false, cf)
+            if r["ok"]:
+                await audit_record(cf, "upload", p, "node", r["node"]["id"], { "via": "link", "token": token, "name": r["node"]["name"] })
+                await sqlite.commit()
+                saved = saved + 1
+            else:
+                await sqlite.rollback()
+                errors.add(f.filename + ": " + r["error"])
+        return redirect(with_params("/s/" + token, { "ok": saved > 0 ? str(saved) + " fichero(s) recibidos" : "", "error": errors.join(" ") }), 303)

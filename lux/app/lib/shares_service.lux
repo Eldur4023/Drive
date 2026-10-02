@@ -1,0 +1,150 @@
+# Compartición interna y enlaces públicos.
+#
+# Como files_service, devuelve los errores esperables en el resultado:
+# {"ok": false, "error": mensaje}.
+
+fn Json share_fail(string msg):
+    return { "ok": false, "error": msg }
+
+# ── Compartición con usuarios ───────────────────────────────────────────────
+
+# Comparte un nodo con otro usuario. `expires_in` en segundos (0 = no caduca).
+fn Json share_with_user(Json node, Json target, string permission, Json created_by, int expires_in, Json message, Json cf):
+    if not cf["sharing.internal_enabled"]:
+        return share_fail("La compartición entre usuarios está desactivada.")
+    if permission != "read" and permission != "write":
+        return share_fail("Permiso no válido: " + permission)
+    if target["id"] == node["owner_id"]:
+        return share_fail("Ese usuario ya es el propietario.")
+    if target["is_active"] != 1:
+        return share_fail("Esa cuenta está desactivada.")
+
+    Json expires = null
+    if expires_in > 0:
+        expires = time.now() + expires_in * 1000
+    await sqlite.exec(
+        "insert into shares (id, node_id, user_id, permission, created_by, created_at, expires_at, message) values (?, ?, ?, ?, ?, ?, ?, ?) on conflict(node_id, user_id) do update set permission = excluded.permission, message = excluded.message, expires_at = excluded.expires_at",
+        new_id(), node["id"], target["id"], permission, created_by["id"], time.now(), expires, message)
+    Json share = first(await sqlite.query("select * from shares where node_id = ? and user_id = ?", node["id"], target["id"]))
+    return { "ok": true, "error": "", "share": share }
+
+fn bool unshare(string share_id):
+    await sqlite.exec("delete from shares where id = ?", share_id)
+    return true
+
+# Comparticiones de un nodo, con el nombre mostrable de cada usuario.
+fn List<Json> shares_of(Json node):
+    List<Json> rows = await sqlite.query("select s.*, u.username as username, u.display_name as display_name from shares s join users u on u.id = s.user_id where s.node_id = ? order by s.created_at", node["id"])
+    for Json r in rows:
+        r["label"] = r["display_name"] == null or r["display_name"] == "" ? r["username"] : r["display_name"]
+    return rows
+
+# ── Enlaces públicos ────────────────────────────────────────────────────────
+
+# Aplica el valor por defecto y el tope máximo de caducidad. null = no caduca.
+fn Json resolve_expiry(Json expires_in, Json cf):
+    Json value = expires_in
+    if value == null:
+        value = cf["sharing.default_link_expiry"]
+    if value != null and cf["sharing.max_link_expiry"] and value > cf["sharing.max_link_expiry"]:
+        value = cf["sharing.max_link_expiry"]
+    return value
+
+# Crea un enlace. `expires_in` en segundos (null = el valor por defecto) y
+# `download_limit` null = el valor por defecto.
+fn Json create_link(Json node, Json created_by, string mode, Json password, Json expires_in, Json download_limit, bool allow_listing, List<string> allowed_networks, Json note, Json cf):
+    if not cf["sharing.public_links_enabled"]:
+        return share_fail("Los enlaces públicos están desactivados.")
+    if not in_list(created_by["role"], cf["sharing.public_links_roles"]):
+        return share_fail("Tu rol no puede crear enlaces públicos.")
+    if mode != "download" and mode != "upload" and mode != "both":
+        return share_fail("Tipo de enlace no válido: " + mode)
+    if mode == "upload" or mode == "both":
+        if not cf["sharing.allow_upload_links"]:
+            return share_fail("Los enlaces de subida están desactivados.")
+        if node["is_dir"] != 1:
+            return share_fail("Un enlace de subida debe apuntar a una carpeta.")
+    if cf["sharing.require_password_on_public_links"] and (password == null or password == ""):
+        return share_fail("La política exige poner contraseña a los enlaces públicos.")
+
+    Json expiry = resolve_expiry(expires_in, cf)
+    Json limit = download_limit == null ? cf["sharing.default_download_limit"] : download_limit
+    Json password_hash = null
+    if password != null and password != "":
+        password_hash = await hash_password(str(password), cf)
+
+    string id = new_id()
+    string token = generate_token(cf["sharing.token_length"])
+    await sqlite.exec(
+        "insert into share_links (id, token, node_id, created_by, mode, password_hash, created_at, expires_at, download_limit, download_count, allow_listing, allowed_networks, revoked, note) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 0, ?)",
+        id, token, node["id"], created_by["id"], mode, password_hash, time.now(),
+        expiry == null ? null : time.now() + expiry * 1000,
+        limit, allow_listing ? 1 : 0, json.stringify(allowed_networks), note)
+    return { "ok": true, "error": "", "link": first(await sqlite.query("select * from share_links where id = ?", id)) }
+
+fn string link_url(Json link, Json cf):
+    return cf["app.base_url"] + "/s/" + link["token"]
+
+fn bool check_link_password(Json link, string password):
+    if link["password_hash"] == null or link["password_hash"] == "":
+        return true
+    return await verify_password(password, link["password_hash"])
+
+fn List<Json> links_of(Json node):
+    return await sqlite.query("select * from share_links where node_id = ? and revoked = 0 order by created_at desc", node["id"])
+
+fn List<Json> links_by_user(string user_id):
+    return await sqlite.query("select * from share_links where created_by = ? and revoked = 0 order by created_at desc", user_id)
+
+fn bool revoke_link(string link_id):
+    await sqlite.exec("update share_links set revoked = 1 where id = ?", link_id)
+    return true
+
+fn bool register_download(string link_id):
+    await sqlite.exec("update share_links set download_count = download_count + 1 where id = ?", link_id)
+    return true
+
+# ── Acceso por token ────────────────────────────────────────────────────────
+
+# Carga un enlace por su token y comprueba que se pueda usar.
+# {"code": 200, "link", "node"} o {"code": 404 | 410, "reason": motivo}.
+fn Json load_link(string token, Json p):
+    Json link = first(await sqlite.query("select * from share_links where token = ?", token))
+    if link == null:
+        return { "code": 404, "reason": "Este enlace no existe." }
+    string why = link_unusable(link, p["ip"])
+    if why != "":
+        return { "code": 410, "reason": why }
+    Json node = await get_node(link["node_id"])
+    if node == null or node["deleted_at"] != null:
+        return { "code": 410, "reason": "El contenido ya no está disponible." }
+    return { "code": 200, "reason": "", "link": link, "node": node }
+
+# Los enlaces con contraseña que este navegador ya ha desbloqueado se recuerdan
+# en una cookie firmada (HMAC con la clave de la instancia) de un día.
+fn string unlock_key(Json cf):
+    return str(cf["security.secret_key"]) + ":share-links"
+
+fn List<string> unlocked_tokens(Json cf):
+    string raw = cookie("drive_links", "")
+    if raw == "":
+        return []
+    Json value = hash.unsign(raw, unlock_key(cf), 86400)
+    if value == null:
+        return []
+    List<string> out = []
+    for Json t in value:
+        out.add(str(t))
+    return out
+
+# Valor de la cookie con `token` añadido (como máximo 30, para que no crezca).
+fn string unlock_cookie_value(Json cf, string token):
+    List<string> tokens = unlocked_tokens(cf)
+    if not tokens.contains(token):
+        tokens.add(token)
+    if len(tokens) > 30:
+        tokens = tokens.slice(len(tokens) - 30)
+    return hash.sign(tokens, unlock_key(cf))
+
+fn bool link_unlocked(Json link, Json cf):
+    return link["password_hash"] == null or unlocked_tokens(cf).contains(link["token"])

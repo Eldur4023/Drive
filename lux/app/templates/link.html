@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}{{ c["node"]["name"] }} · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">{{ c["node"]["icon"] }} {{ c["node"]["name"] }}</h2>
+    <span class="tag">enlace compartido</span>
+  </div>
+  {% if c["link"]["expires_at"] %}
+    <p class="muted">Este enlace caduca el {{ c["expires_h"] }}.</p>
+  {% endif %}
+  {% if c["link"]["download_limit"] %}
+    <p class="muted">Descargas: {{ c["link"]["download_count"] }} de {{ c["link"]["download_limit"] }}.</p>
+  {% endif %}
+
+  {% if len(c["breadcrumbs"]) > 1 %}
+    <div class="breadcrumbs">
+      {% for crumb in c["breadcrumbs"] %}
+        <span class="sep">{% if not loop.first %}/{% endif %}</span>
+        <a href="/s/{{ c["link"]["token"] }}?node_id={{ crumb["id"] }}">{{ crumb["name"] }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if c["node"]["is_dir"] != 1 %}
+    {% if c["can_download"] %}
+      <p><a class="button primary" href="/s/{{ c["link"]["token"] }}/download/{{ c["node"]["id"] }}">Descargar</a></p>
+    {% else %}
+      <p class="muted">Este enlace sólo admite subidas.</p>
+    {% endif %}
+  {% elif len(c["items"]) > 0 %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th class="right"></th></tr></thead>
+        <tbody>
+          {% for item in c["items"] %}
+          <tr>
+            <td>
+              <div class="name-cell">
+                <span class="icon">{{ item["icon"] }}</span>
+                {% if item["is_dir"] == 1 %}
+                  <a href="/s/{{ c["link"]["token"] }}?node_id={{ item["id"] }}">{{ item["name"] }}</a>
+                {% else %}
+                  <span>{{ item["name"] }}</span>
+                {% endif %}
+              </div>
+            </td>
+            <td class="hide-sm">{{ item["size_h"] }}</td>
+            <td class="right">
+              {% if c["can_download"] and item["is_dir"] != 1 %}
+                <a class="button small" href="/s/{{ c["link"]["token"] }}/download/{{ item["id"] }}">Descargar</a>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% elif c["link"]["allow_listing"] == 1 %}
+    <p class="muted">Esta carpeta está vacía.</p>
+  {% else %}
+    <p class="muted">El contenido de esta carpeta no es visible.</p>
+  {% endif %}
+</div>
+
+{% if c["can_upload"] %}
+<div class="card">
+  <h2>Dejar ficheros</h2>
+  <p class="muted">Puedes subir ficheros a esta carpeta sin necesidad de tener cuenta.</p>
+  <form method="post" action="/s/{{ c["link"]["token"] }}/upload" enctype="multipart/form-data">
+    <input type="hidden" name="node_id" value="{{ c["node"]["id"] }}">
+    <div class="dropzone" data-dropzone>
+      <input type="file" name="files" multiple>
+      <p class="muted">Arrastra ficheros aquí o pulsa para elegirlos.</p>
+    </div>
+    <button class="primary" type="submit" style="margin-top:10px">Subir</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

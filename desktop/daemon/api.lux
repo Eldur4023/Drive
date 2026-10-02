@@ -1,0 +1,130 @@
+# API local, sólo en 127.0.0.1. La usa la app de escritorio; todas las rutas
+# exigen el secreto del fichero `api-token` en la cabecera X-Drive-Sync-Token.
+
+fn bool need_token():
+    string want = await setting("api_token", "")
+    string given = header("X-Drive-Sync-Token", "")
+    if want == "" or not hash.equal(given, want):
+        abort(401, "falta el secreto de la API local")
+    return true
+
+fn Json link_view(Json row):
+    return {
+        "id": row["id"],
+        "local_path": row["local_path"],
+        "remote_id": row["remote_id"],
+        "remote_name": row["remote_name"],
+        "enabled": int(row["enabled"]) == 1,
+        "status": row["status"],
+        "last_sync": row["last_sync"],
+        "last_error": row["last_error"]
+    }
+
+get endpoint("/api/status"):
+    await need_token()
+    List<Json> rows = await sqlite.query("select * from links order by id")
+    List<Json> links = []
+    for Json row in rows:
+        links.add(link_view(row))
+    return {
+        "configured": await configured(),
+        "server_url": await server_url(),
+        "user": await setting("user", ""),
+        "online": await setting("online", "") == "1",
+        "poll_seconds": int(await setting("poll_seconds", "60")),
+        "links": links
+    }
+
+# Guarda el servidor y el token tras comprobar que funcionan.
+post endpoint("/api/settings", Json body):
+    await need_token()
+    string url = str(body["server_url"]).trim()
+    while url.ends_with("/"):
+        url = url.slice(0, len(url) - 1)
+    string token = str(body["token"]).trim()
+    if not (url.starts_with("http://") or url.starts_with("https://")) or token == "":
+        return { "ok": false, "error": "indica la dirección de Drive (http://…) y un token de API" }.status(400)
+    try:
+        Json r = await http.get(url + "/api/me", { "Authorization": "Bearer " + token }, { "timeout_ms": 10000 })
+        if r["status"] != 200:
+            return { "ok": false, "error": "Drive respondió " + str(r["status"]) + ": ¿es la dirección correcta?" }.status(400)
+        if r["body"] == null or not r["body"]["authenticated"]:
+            return { "ok": false, "error": "Drive no acepta ese token (¿caducado o mal copiado?)" }.status(400)
+        string scopes = str(r["body"]["scopes"])
+        if not scopes.contains("read") or not scopes.contains("write"):
+            return { "ok": false, "error": "el token necesita los ámbitos «read» y «write» (perfil → tokens de API)" }.status(400)
+        await put_setting("server_url", url)
+        await put_setting("token", token)
+        await put_setting("user", str(r["body"]["display_name"]))
+        await put_setting("online", "1")
+        await sqlite.exec("update links set force = 1, last_error = ''")
+        return { "ok": true, "user": r["body"]["display_name"] }
+    catch e:
+        return { "ok": false, "error": "no se pudo contactar con Drive: " + e.message }.status(400)
+
+post endpoint("/api/links", Json body):
+    await need_token()
+    string path = os.path_abs(str(body["local_path"]).trim())
+    if path == "/" or not os.is_dir(path):
+        return { "ok": false, "error": "la carpeta no existe: " + path }.status(400)
+    # Dos enlaces que se solapan sincronizarían lo mismo dos veces.
+    List<Json> rows = await sqlite.query("select local_path from links")
+    for Json row in rows:
+        string other = str(row["local_path"])
+        if path == other or path.starts_with(other + "/") or other.starts_with(path + "/"):
+            return { "ok": false, "error": "se solapa con la carpeta ya enlazada " + other }.status(409)
+    await sqlite.exec("insert into links (local_path, remote_id, remote_name, created_at) values (?, ?, ?, ?)",
+        path, str(body["remote_id"]), str(body["remote_name"]), time.now())
+    int id = await sqlite.last_id()
+    await note(id, "info", "carpeta enlazada: " + path + " ↔ " + str(body["remote_name"]))
+    return { "ok": true, "id": id }.status(201)
+
+# Quitar el enlace no toca ningún fichero, ni local ni en Drive.
+delete endpoint("/api/links/:id", int id):
+    await need_token()
+    await sqlite.exec("delete from entries where link_id = ?", id)
+    await sqlite.exec("delete from links where id = ?", id)
+    return { "ok": true }
+
+post endpoint("/api/links/:id/enabled", int id, Json body):
+    await need_token()
+    await sqlite.exec("update links set enabled = ?, force = 1 where id = ?", body["enabled"] ? 1 : 0, id)
+    return { "ok": true }
+
+# «Sincronizar ya»: marca y la próxima pasada (≤5 s) lo hace.
+post endpoint("/api/sync"):
+    await need_token()
+    await sqlite.exec("update links set force = 1 where enabled = 1")
+    return { "ok": true }
+
+# Carpetas de Drive, para elegir con cuál enlazar.
+get endpoint("/api/remote/folders"):
+    await need_token()
+    string parent = query("parent_id", "")
+    string path = "/api/files"
+    if parent != "":
+        path = path + "?parent_id=" + parent
+    Json r = await api_get(path)
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    List<Json> folders = []
+    List<Json> items = r["body"]["items"]
+    for Json it in items:
+        if it["is_dir"]:
+            folders.add({ "id": it["id"], "name": it["name"] })
+    return { "ok": true, "folders": folders }
+
+get endpoint("/api/events"):
+    await need_token()
+    return await sqlite.query("select ts, link_id, level, message from events order by id desc limit 100")
+
+# Crea una carpeta en Drive (desde el selector de «con qué carpeta enlazar»).
+post endpoint("/api/remote/folders", Json body):
+    await need_token()
+    string name = str(body["name"]).trim()
+    if name == "":
+        return { "ok": false, "error": "falta el nombre" }.status(400)
+    Json r = await remote_mkdir(str(body["parent_id"]), name)
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    return { "ok": true, "id": r["body"]["id"], "name": r["body"]["name"] }.status(201)

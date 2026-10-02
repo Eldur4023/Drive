@@ -1,0 +1,31 @@
+# Generación de miniaturas para las vistas de galería.
+
+fn bool can_thumbnail(Json mime, int size, Json cf):
+    if not cf["thumbnails.enabled"] or mime == null or mime == "":
+        return false
+    string m = str(mime)
+    if m == "image/svg+xml" or m == "image/heic" or m == "image/heif":
+        return false
+    if cf["thumbnails.max_source_size"] and size > cf["thumbnails.max_source_size"]:
+        return false
+    return m.starts_with("image/")
+
+# Crea (o reutiliza) la miniatura de un blob y devuelve su ruta, o "" si no se
+# puede. Se escribe a un temporal y se mueve al final para que nadie lea una
+# miniatura a medias.
+fn string generate_thumb(string digest, int size, Json cf):
+    string target = thumb_path(digest, size, cf)
+    if os.is_file(target):
+        return target
+    string source = blob_path(digest, cf)
+    if not os.is_file(source):
+        return ""
+    try:
+        os.make_dir(os.path_dirname(target))
+        string tmp = target.slice(0, len(target) - 5) + "." + new_id().slice(0, 8) + ".tmp.webp"
+        await image.resize(source, tmp, { "width": size, "height": size, "fit": "contain", "quality": 82 })
+        await os.move(tmp, target)
+        return target
+    catch e:
+        log.info("no se pudo generar miniatura de " + digest + ": " + e.message)
+        return ""

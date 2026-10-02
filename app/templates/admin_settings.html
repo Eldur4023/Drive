@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Ajustes · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row" style="margin-bottom:16px">
+  <a class="button" href="/admin">Resumen</a>
+  <a class="button" href="/admin/users">Usuarios</a>
+  <a class="button primary" href="/admin/settings">Ajustes</a>
+  <a class="button" href="/admin/audit">Auditoría</a>
+</div>
+
+<div class="notice">
+  Lo que guardes aquí se almacena en la base de datos y tiene prioridad sobre
+  <span class="mono">config.yaml</span>, pero las variables de entorno siguen
+  ganando a ambos. Los ajustes marcados con ● están sobrescritos desde este panel.
+</div>
+
+<form method="post" action="/admin/settings">
+  {% for group, settings in groups.items() %}
+  <div class="card">
+    <h2>{{ group }}</h2>
+    {% for setting in settings %}
+      {% set field = setting.key.replace('.', '__') %}
+      <div class="field">
+        <label for="{{ field }}">
+          {{ setting.label }}
+          {% if setting.key in overridden %}<span title="Sobrescrito desde el panel">●</span>{% endif %}
+          <span class="mono muted">{{ setting.key }}</span>
+        </label>
+
+        {% if setting.kind == 'bool' %}
+          <input type="checkbox" id="{{ field }}" name="{{ field }}" value="true"
+                 {% if values[setting.key] in ('True', 'true') %}checked{% endif %}>
+        {% elif setting.kind == 'choice' %}
+          <select id="{{ field }}" name="{{ field }}">
+            {% for option in setting.options %}
+              <option value="{{ option }}" {% if values[setting.key] == option %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+          </select>
+        {% elif setting.kind == 'int' %}
+          <input type="number" id="{{ field }}" name="{{ field }}" value="{{ values[setting.key] }}">
+        {% else %}
+          <input id="{{ field }}" name="{{ field }}" value="{{ values[setting.key] }}" style="width:100%">
+        {% endif %}
+
+        {% if setting.help %}<p class="muted">{{ setting.help }}</p>{% endif %}
+      </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <button class="primary" type="submit">Guardar ajustes</button>
+  </div>
+</form>
+
+<div class="card">
+  <h2>Volver un ajuste a config.yaml</h2>
+  <form method="post" action="/admin/settings/reset" class="row">
+    <input name="key" placeholder="p. ej. network.trusted_mode" required style="min-width:280px">
+    <button type="submit">Restablecer</button>
+  </form>
+
+  <h3>Sólo editables en el fichero o por entorno</h3>
+  <p class="muted mono">{{ locked|join(', ') }}</p>
+</div>
+{% endblock %}

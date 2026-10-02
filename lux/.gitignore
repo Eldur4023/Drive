@@ -1,0 +1,7 @@
+data/
+*.db
+*.db-wal
+*.db-shm
+.lux-native/
+.env
+config/config.local.json

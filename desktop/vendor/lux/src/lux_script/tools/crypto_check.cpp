@@ -1,0 +1,106 @@
+// Herramienta de desarrollo: comprueba SHA-256, HMAC-SHA256 y base64url.
+//
+//   crypto_check sha  <text>
+//   crypto_check hmac <clave> <text>
+//   crypto_check b64  <text>
+//   crypto_check self          → vectores conocidos
+#include <lux_script/crypto.hpp>
+#include <iostream>
+#include <string>
+
+namespace {
+
+std::string hex(const std::string& raw) {
+    static const char* d = "0123456789abcdef";
+    std::string out;
+    out.reserve(raw.size() * 2);
+    for (unsigned char c : raw) { out += d[c >> 4]; out += d[c & 0xF]; }
+    return out;
+}
+
+int failures = 0;
+
+void expect(const std::string& what, const std::string& got, const std::string& want) {
+    bool ok = (got == want);
+    if (!ok) ++failures;
+    std::cout << (ok ? "  ok   " : "  FALLO ") << what << "\n";
+    if (!ok) std::cout << "        obtenido: " << got << "\n"
+                       << "        expected: " << want << "\n";
+}
+
+int self_test() {
+    using namespace lux_script::crypto;
+
+    expect("sha256(\"\")", hex(sha256("")),
+           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    expect("sha256(\"abc\")", hex(sha256("abc")),
+           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    expect("sha256(56 bytes)",
+           hex(sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+
+    // Crosses the block boundary in the padding (55, 56 and 64 bytes are the
+    // cases that break a badly done implementation).
+    expect("sha256(55 x 'a')", hex(sha256(std::string(55, 'a'))),
+           "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+    expect("sha256(56 x 'a')", hex(sha256(std::string(56, 'a'))),
+           "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a");
+    expect("sha256(64 x 'a')", hex(sha256(std::string(64, 'a'))),
+           "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+
+    // RFC 4231, caso 2.
+    expect("hmac(\"Jefe\", ...)",
+           hex(hmac_sha256("Jefe", "what do ya want for nothing?")),
+           "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+
+    // Key longer than the block: it is replaced by its hash (RFC 2104).
+    expect("hmac(131-byte key)",
+           hex(hmac_sha256(std::string(131, '\xaa'),
+                           "Test Using Larger Than Block-Size Key - Hash Key First")),
+           "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+
+    expect("sha1(abc)", hex(sha1("abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    expect("hmac_sha1(Jefe)", hex(hmac_sha1("Jefe", "what do ya want for nothing?")),
+           "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+    std::string b32;
+    expect("base32(foobar)", base32_encode("foobar"), "MZXW6YTBOI");
+    expect("base32 ida y vuelta", base32_decode("mzxw 6ytb oi======", b32) && b32 == "foobar" ? "si" : "no", "si");
+    std::string round;
+    const std::string raw = std::string("\x00\x01\xfe\xff", 4) + "lux_script";
+    expect("base64url ida y vuelta",
+           base64url_decode(base64url_encode(raw), round) && round == raw ? "si" : "no",
+           "si");
+    expect("base64url without padding", base64url_encode("a"), "YQ");
+    expect("base64url alfabeto url-safe",
+           base64url_encode(std::string("\xfb\xff", 2)), "-_8");
+
+    // RFC 7914 §11 test vectors for PBKDF2-HMAC-SHA256.
+    expect("pbkdf2(passwd, salt, 1)", hex(pbkdf2_sha256("passwd", "salt", 1, 64)),
+           "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+           "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783");
+    expect("pbkdf2(Password, NaCl, 80000)", hex(pbkdf2_sha256("Password", "NaCl", 80000, 64)),
+           "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+           "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d");
+    expect("base64 decode, standard alphabet",
+           base64url_decode("+/8=", round) && round == std::string("\xfb\xff", 2) ? "si" : "no", "si");
+
+    std::cout << (failures ? "\nFALLOS: " : "\ntodo correcto (")
+              << (failures ? std::to_string(failures) : std::string("14"))
+              << (failures ? "" : " comprobaciones)") << "\n";
+    return failures ? 1 : 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) { std::cerr << "uso: crypto_check self|sha|hmac|b64 ...\n"; return 2; }
+    std::string mode = argv[1];
+
+    if (mode == "self") return self_test();
+    if (mode == "sha"  && argc > 2) { std::cout << hex(lux_script::crypto::sha256(argv[2])) << "\n"; return 0; }
+    if (mode == "hmac" && argc > 3) { std::cout << hex(lux_script::crypto::hmac_sha256(argv[2], argv[3])) << "\n"; return 0; }
+    if (mode == "b64"  && argc > 2) { std::cout << lux_script::crypto::base64url_encode(argv[2]) << "\n"; return 0; }
+
+    std::cerr << "argumentos invalidos\n";
+    return 2;
+}

@@ -1,0 +1,239 @@
+# Inicio de sesión, registro y segundo factor.
+
+group(""):
+    require await gate_ok() else text("Acceso no permitido desde tu red.").status(403)
+
+    # ── Login ───────────────────────────────────────────────────────────────
+
+    get endpoint("/login", string next = "/"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        string dest = safe_next(next)
+        if p_authenticated(p) and p["kind"] == "user":
+            return redirect(dest, 303)
+        # Si no hay ninguna cuenta todavía, se ofrece crear la primera.
+        int users = await count_of("select count(*) as n from users")
+        return render("login.html", c=ctx(cf, p, {
+            "next": dest,
+            "username": "",
+            "trusted_network": is_trusted_network(client_ip(cf), cf),
+            "registration_open": cf["auth.registration_enabled"],
+            "needs_bootstrap": users == 0
+        }))
+
+    post endpoint("/login"):
+        Json cf = await config()
+        string ip = client_ip(cf)
+        Json anon = new_principal(ip, is_trusted_network(ip, cf))
+        string username = form("username", "")
+        string password = form("password", "")
+        string dest = safe_next(form("next", "/"))
+
+        Json rl = rate_check(cf, "login", ip, ip)
+        if not rl["ok"]:
+            return render("login.html", c=ctx(cf, anon, {
+                "error": "Demasiados intentos. Espera " + str(rl["retry"]) + " segundos.",
+                "next": dest, "username": "", "trusted_network": anon["trusted_network"],
+                "registration_open": false, "needs_bootstrap": false
+            })).status(429)
+
+        Json r = await authenticate(username, password, ip, cf)
+        if not r["ok"]:
+            await audit_record(cf, "login_failed", null, "user", username, { "reason": r["message"] })
+            return render("login.html", c=ctx(cf, anon, {
+                "error": r["message"],
+                "next": dest, "username": username, "trusted_network": anon["trusted_network"],
+                "registration_open": false, "needs_bootstrap": false
+            })).status(401)
+
+        rate_reset("login", ip)
+        Json user = r["user"]
+
+        # Si el usuario tiene 2FA activo, la sesión nace a medio hacer.
+        bool pending = user["totp_enabled"] == 1 or totp_required(user["role"], cf)
+        string token = await create_session(user, cf, false, pending)
+
+        string destination = dest
+        if pending and user["totp_enabled"] != 1:
+            # 2FA obligatorio por política pero aún no configurado: se le lleva
+            # a configurarlo antes de poder usar nada.
+            destination = "/2fa/setup"
+        elif pending:
+            destination = "/2fa?next=" + encoding.url_encode(dest)
+        else:
+            Json who = new_principal(ip, anon["trusted_network"])
+            who["kind"] = "user"
+            who["user"] = user
+            await audit_record(cf, "login", who, "", "", {})
+
+        return redirect(destination, 303).cookie(session_cookie_name(cf), token, max_age=session_lifetime(cf), secure=cf["security.session.cookie_secure"], same_site=cf["security.session.cookie_samesite"])
+
+    post endpoint("/logout"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        if p["session_id"] != null:
+            await audit_record(cf, "logout", p, "", "", {})
+            await revoke_session(p["session_id"])
+        return redirect("/login", 303).cookie(session_cookie_name(cf), "", max_age=0, secure=cf["security.session.cookie_secure"], same_site=cf["security.session.cookie_samesite"])
+
+    # ── Segundo factor ──────────────────────────────────────────────────────
+
+    get endpoint("/2fa", string next = "/"):
+        Json cf = await config()
+        Json pending = await pending_session(cf)
+        require pending != null else redirect("/login", 303)
+        return render("totp.html", c=ctx(cf, new_principal("", false), { "next": safe_next(next) }))
+
+    post endpoint("/2fa"):
+        Json cf = await config()
+        Json pending = await pending_session(cf)
+        require pending != null else redirect("/login", 303)
+        string dest = safe_next(form("next", "/"))
+        string code = form("code", "")
+        Json user = await get_user(pending["user_id"])
+        string ip = client_ip(cf)
+        Json anon = new_principal(ip, is_trusted_network(ip, cf))
+
+        Json rl = rate_check(cf, "login", "totp:" + user["id"], ip)
+        if not rl["ok"]:
+            return render("totp.html", c=ctx(cf, anon, { "error": "Demasiados intentos. Espera " + str(rl["retry"]) + " segundos.", "next": dest })).status(429)
+
+        if not await verify_totp(user["totp_secret"], code):
+            await audit_record(cf, "login_failed", null, "", user["id"], { "reason": "totp" })
+            return render("totp.html", c=ctx(cf, anon, { "error": "Código incorrecto.", "next": dest })).status(401)
+
+        await sqlite.exec("update sessions set pending_totp = 0 where id = ?", pending["id"])
+        await sqlite.exec("update users set last_login_at = ? where id = ?", time.now(), user["id"])
+        Json who = new_principal(ip, anon["trusted_network"])
+        who["kind"] = "user"
+        who["user"] = user
+        await audit_record(cf, "login", who, "", "", { "method": "totp" })
+        return redirect(dest, 303)
+
+    # Alta del segundo factor. Accesible también con la sesión a medio hacer.
+    get endpoint("/2fa/setup"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json user = p["user"]
+        if user == null:
+            Json pending = await pending_session(cf)
+            require pending != null else redirect("/login", 303)
+            user = await get_user(pending["user_id"])
+
+        string secret = user["totp_secret"] == null ? "" : user["totp_secret"]
+        if secret == "" or user["totp_enabled"] != 1:
+            secret = new_totp_secret()
+            await sqlite.exec("update users set totp_secret = ? where id = ?", secret, user["id"])
+
+        string uri = totp_uri(secret, user["username"], cf)
+        return render("totp_setup.html", c=ctx(cf, p, {
+            "secret": secret,
+            "uri": uri,
+            "qr": await qr_svg(uri),
+            "already_enabled": user["totp_enabled"] == 1
+        }))
+
+    post endpoint("/2fa/setup"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json user = p["user"]
+        Json pending = null
+        if user == null:
+            pending = await pending_session(cf)
+            require pending != null else redirect("/login", 303)
+            user = await get_user(pending["user_id"])
+
+        if not await verify_totp(user["totp_secret"], form("code", "")):
+            string uri = totp_uri(user["totp_secret"] == null ? "" : user["totp_secret"], user["username"], cf)
+            return render("totp_setup.html", c=ctx(cf, p, {
+                "error": "El código no coincide. Comprueba la hora del dispositivo.",
+                "secret": user["totp_secret"] == null ? "" : user["totp_secret"],
+                "uri": uri,
+                "qr": await qr_svg(uri),
+                "already_enabled": false
+            })).status(400)
+
+        await sqlite.exec("update users set totp_enabled = 1 where id = ?", user["id"])
+        if pending != null:
+            await sqlite.exec("update sessions set pending_totp = 0 where id = ?", pending["id"])
+        return redirect("/", 303)
+
+    post endpoint("/2fa/disable"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        require p["user"] != null else redirect("/login", 303)
+        Json user = p["user"]
+        if totp_required(user["role"], cf):
+            return redirect(with_params("/profile", { "error": "La política exige 2FA para tu rol" }), 303)
+        if not await verify_password(form("password", ""), user["password_hash"]):
+            return redirect(with_params("/profile", { "error": "Contraseña incorrecta" }), 303)
+        await sqlite.exec("update users set totp_enabled = 0, totp_secret = null where id = ?", user["id"])
+        return redirect(with_params("/profile", { "ok": "2FA desactivado" }), 303)
+
+    # ── Registro ────────────────────────────────────────────────────────────
+
+    get endpoint("/register"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        bool first_user = await count_of("select count(*) as n from users") == 0
+        if not cf["auth.registration_enabled"] and not first_user:
+            return render("message.html", c=mp(cf, p, "Registro cerrado", "Esta instancia no admite registros. Pide una cuenta al administrador.")).status(403)
+        return render("register.html", c=ctx(cf, p, { "first_user": first_user, "username": "", "email": "", "policy_hint": policy_hint(cf) }))
+
+    post endpoint("/register"):
+        Json cf = await config()
+        string ip = client_ip(cf)
+        Json p = new_principal(ip, is_trusted_network(ip, cf))
+        bool first_user = await count_of("select count(*) as n from users") == 0
+
+        if not cf["auth.registration_enabled"] and not first_user:
+            return render("message.html", c=mp(cf, p, "Registro cerrado", "Esta instancia no admite registros.")).status(403)
+
+        Json rl = rate_check(cf, "signup", ip, ip)
+        if not rl["ok"]:
+            return render("register.html", c=ctx(cf, p, { "error": "Demasiados intentos. Espera " + str(rl["retry"]) + " segundos.", "first_user": first_user, "username": "", "email": "", "policy_hint": policy_hint(cf) })).status(429)
+
+        string username = form("username", "").trim()
+        string email = form("email", "").trim().lower()
+        string password = form("password", "")
+        string password2 = form("password2", "")
+
+        string problem = ""
+        if not regex.test("^[A-Za-z0-9._-]+$", username):
+            problem = "El nombre de usuario sólo admite letras, números, punto, guion y guion bajo."
+        elif len(username) < 3:
+            problem = "El nombre de usuario debe tener al menos 3 caracteres."
+        elif password != password2:
+            problem = "Las contraseñas no coinciden."
+        else:
+            List<string> policy = check_password_policy(password, username, email, cf)
+            if len(policy) > 0:
+                problem = policy.join(" ")
+        if problem == "" and email != "" and len(cf["auth.allowed_email_domains"]) > 0:
+            string domain = email.split("@")[len(email.split("@")) - 1]
+            if not in_list(domain, cf["auth.allowed_email_domains"]):
+                problem = "Ese dominio de correo no está admitido."
+        if problem == "" and await get_user_by_name(username) != null:
+            problem = "Ese nombre de usuario ya está en uso."
+        if problem == "" and email != "" and len(await sqlite.query("select id from users where email = ?", email)) > 0:
+            problem = "Ese correo ya está registrado."
+        if problem != "":
+            return render("register.html", c=ctx(cf, p, { "error": problem, "username": username, "email": email, "first_user": first_user, "policy_hint": policy_hint(cf) })).status(400)
+
+        # La primera cuenta de la instancia es siempre administradora: si no,
+        # nadie podría aprobar al resto.
+        string role = first_user ? "admin" : cf["auth.default_role"]
+        bool approved = first_user or not cf["auth.require_admin_approval"]
+        string id = new_id()
+        long now = time.now()
+        await sqlite.exec(
+            "insert into users (id, username, email, password_hash, role, is_active, is_approved, created_at, password_changed_at) values (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            id, username, email == "" ? null : email, await hash_password(password, cf), role, approved ? 1 : 0, now, now)
+        await audit_record(cf, "user_create", null, "user", username, { "self_registered": true })
+
+        if not approved:
+            return render("message.html", c=mp(cf, p, "Cuenta creada", "Tu cuenta está pendiente de que un administrador la apruebe."))
+
+        Json user = await get_user(id)
+        string token = await create_session(user, cf, false, false)
+        return redirect("/", 303).cookie(session_cookie_name(cf), token, max_age=session_lifetime(cf), secure=cf["security.session.cookie_secure"], same_site=cf["security.session.cookie_samesite"])

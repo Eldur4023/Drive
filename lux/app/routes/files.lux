@@ -1,0 +1,349 @@
+# Navegación, subida y descarga de ficheros.
+#
+# Cada ruta empieza igual: cargar la configuración y el principal, y cortar si
+# no hay sesión. Lux no deja que una función devuelva una respuesta, así que
+# esos cortes los hacen need_login(), authz() y allow() (lib/ctx.lux), que
+# terminan la petición con abort().
+
+# Datos de la pantalla de una carpeta (o de la raíz si `current` es null).
+fn Json browse_ctx(Json cf, Json p, Json current, string order):
+    Json user = p["user"]
+    List<Json> crumbs = []
+    string owner_id = user["id"]
+    Json parent_id = null
+    if current != null:
+        crumbs = await path_of(current)
+        # Al abrir una carpeta ajena compartida se listan sus hijos; en la
+        # raíz, los del propio usuario.
+        owner_id = current["owner_id"]
+        parent_id = current["id"]
+    List<Json> items = await children_of(owner_id, parent_id, order)
+    return {
+        "current_id": current == null ? "" : current["id"],
+        "current_name": current == null ? "" : current["name"],
+        "breadcrumbs": crumbs,
+        "items": view_nodes(items, cf),
+        "order": order,
+        "usage": usage_view(usage_of(user, cf)),
+        "shared_count": len(await shared_with(user["id"]))
+    }
+
+group(""):
+    require await gate_ok() else text("Acceso no permitido desde tu red.").status(403)
+
+    get endpoint("/"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        return redirect(p_authenticated(p) ? "/files" : "/browse", 303)
+
+    # ── Navegación ──────────────────────────────────────────────────────────
+
+    get endpoint("/files", string order = ""):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        return render("files.html", c=ctx(cf, p, await browse_ctx(cf, p, null, order == "" ? pref_order(p) : order)))
+
+    get endpoint("/files/:node_id", string node_id, string order = ""):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json current = await get_node(node_id)
+        Json a = await authz(p, current, "read", cf)
+        if current["is_dir"] != 1:
+            return redirect("/files/" + current["id"] + "/detail", 303)
+        return render("files.html", c=ctx(cf, p, await browse_ctx(cf, p, current, order == "" ? pref_order(p) : order)))
+
+    get endpoint("/shared"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        List<Json> items = []
+        Json labels = {}
+        for Json n in await shared_with(p["user"]["id"]):
+            if not labels.has(n["owner_id"]):
+                labels[n["owner_id"]] = user_label(await get_user(n["owner_id"]))
+            Json v = view_node(n, cf)
+            v["owner_label"] = labels[n["owner_id"]]
+            items.add(v)
+        return render("shared.html", c=ctx(cf, p, { "items": items }))
+
+    get endpoint("/trash"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        List<Json> items = view_nodes(await trashed_of(p["user"]["id"]), cf)
+        return render("trash.html", c=ctx(cf, p, { "items": items, "retention_text": fmt_duration(cf["trash.retention"]) }))
+
+    get endpoint("/search", string q = ""):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        List<Json> results = q.trim() == "" ? [] : await search_nodes(p["user"]["id"], q)
+        return render("search.html", c=ctx(cf, p, { "items": view_nodes(results, cf) }))
+
+    get endpoint("/files/:node_id/detail", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+
+        Json access = a["access"]
+        string tz = cf["app.timezone"]
+        bool can_manage = access_allows(access, "owner")
+
+        List<Json> versions = []
+        for Json v in await sqlite.query("select * from node_versions where node_id = ? order by created_at desc, rowid desc", node["id"]):
+            Json row = {}.merge(v)
+            row["created_h"] = fmt_date(v["created_at"], tz)
+            row["created_rel"] = fmt_rel(v["created_at"], tz)
+            row["size_h"] = format_size(v["size"])
+            versions.add(row)
+
+        List<Json> shares = []
+        List<Json> links = []
+        List<Json> users = []
+        if can_manage:
+            for Json s in await shares_of(node):
+                Json row = {}.merge(s)
+                row["permission_text"] = s["permission"] == "read" ? "lectura" : "escritura"
+                row["expires_h"] = s["expires_at"] == null ? "sin caducidad" : fmt_date(s["expires_at"], tz)
+                shares.add(row)
+            for Json l in await links_of(node):
+                Json row = {}.merge(l)
+                row["url"] = link_url(l, cf)
+                row["has_password"] = l["password_hash"] != null
+                row["has_networks"] = len(parse_json_text(l["allowed_networks"], [])) > 0
+                row["expires_h"] = l["expires_at"] == null ? "sin caducidad" : fmt_date(l["expires_at"], tz)
+                row["downloads_text"] = str(l["download_count"]) + (l["download_limit"] == null ? "" : " / " + str(l["download_limit"]))
+                links.add(row)
+            for Json u in await sqlite.query("select * from users where id != ? and is_active = 1 order by username", node["owner_id"]):
+                users.add({ "username": u["username"], "label": user_label(u) })
+
+        Json owner = await get_user(node["owner_id"])
+        return render("detail.html", c=ctx(cf, p, {
+            "node": view_node(node, cf),
+            "breadcrumbs": await path_of(node),
+            "versions": versions,
+            "shares": shares,
+            "links": links,
+            "users": users,
+            "owner_label": owner == null ? "—" : user_label(owner),
+            "type_text": node["is_dir"] == 1 ? "Carpeta" : (node["mime_type"] == null ? "desconocido" : node["mime_type"]),
+            "access_text": access["permission"] == null ? "ninguno" : access["permission"],
+            "access_source": access_source_text(access["source"]),
+            "can_manage": can_manage
+        }))
+
+    # ── Descarga ────────────────────────────────────────────────────────────
+
+    get endpoint("/files/:node_id/download", string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+        allow(p, "download", cf)
+        Json rl = rate_check(cf, "download", p["ip"], p["ip"])
+        if not rl["ok"]:
+            abort(status(429, "Demasiadas descargas seguidas.").header("Retry-After", str(rl["retry"])))
+
+        Json meta = blob_meta(node, false, cf)
+        if not (meta["ok"]):
+            abort(404, meta["error"])
+        await audit_record(cf, "download", p, "node", node["id"], { "name": node["name"] })
+        return send_file(meta["path"], { "filename": node["name"], "inline": false }).header("Content-Type", meta["ctype"]).header("Cache-Control", "private, max-age=86400")
+
+    get endpoint("/files/:node_id/preview", string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+        Json meta = blob_meta(node, true, cf)
+        if not (meta["ok"]):
+            abort(404, meta["error"])
+        return send_file(meta["path"], { "filename": node["name"], "inline": true }).header("Content-Type", meta["ctype"]).header("Cache-Control", "private, max-age=86400")
+
+    get endpoint("/files/:node_id/thumb", string node_id, int size = 256):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+        if not (node["blob_hash"] != null and can_thumbnail(node["mime_type"], node["size"], cf)):
+            abort(404, "Sin miniatura.")
+
+        # Sólo se sirven los tamaños declarados, para que nadie pueda forzar la
+        # generación de miles de variantes.
+        int chosen = cf["thumbnails.sizes"][0]
+        for Json s in cf["thumbnails.sizes"]:
+            if math.abs(int(s) - size) < math.abs(chosen - size):
+                chosen = int(s)
+        string path = await generate_thumb(node["blob_hash"], chosen, cf)
+        if not (path != ""):
+            abort(404, "Sin miniatura.")
+        return send_file(path).header("Content-Type", "image/webp").header("Cache-Control", "private, max-age=604800")
+
+    # ── Mutaciones ──────────────────────────────────────────────────────────
+
+    post endpoint("/files/upload", List<File> files, string parent_id = "", bool overwrite = false):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "upload", cf)
+
+        Json parent = null
+        Json owner = p["user"]
+        if parent_id != "":
+            parent = await get_node(parent_id)
+            Json a = await authz(p, parent, "write", cf)
+            if not (parent["is_dir"] == 1):
+                abort(400, "El destino no es una carpeta.")
+            # Al subir a una carpeta compartida, el fichero pertenece a su
+            # dueño y consume su cuota, no la de quien lo sube.
+            Json parent_owner = await get_user(parent["owner_id"])
+            owner = parent_owner == null ? owner : parent_owner
+
+        int saved = 0
+        List<string> errors = []
+        for File f in files:
+            if f.filename == "":
+                continue
+            await sqlite.begin()
+            Json r = await save_upload(owner, parent, f.filename, f, overwrite, cf)
+            if r["ok"]:
+                await audit_record(cf, "upload", p, "node", r["node"]["id"], { "name": r["node"]["name"], "size": r["node"]["size"] })
+                await sqlite.commit()
+                saved = saved + 1
+            else:
+                await sqlite.rollback()
+                errors.add(f.filename + ": " + r["error"])
+        return redirect(back_url(parent, saved > 0 ? str(saved) + " fichero(s) subidos." : "", errors.join(" ")), 303)
+
+    post endpoint("/files/mkdir"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "upload", cf)
+
+        Json parent = null
+        Json owner = p["user"]
+        string parent_id = form("parent_id", "")
+        if parent_id != "":
+            parent = await get_node(parent_id)
+            Json a = await authz(p, parent, "write", cf)
+            Json parent_owner = await get_user(parent["owner_id"])
+            owner = parent_owner == null ? owner : parent_owner
+        await create_folder(owner, parent, form("name", ""))
+        return redirect(back_url(parent, "Carpeta creada.", ""), 303)
+
+    post endpoint("/files/:node_id/rename", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+        Json parent = await get_node(node["parent_id"])
+        Json r = await rename_node(node, form("name", ""), cf)
+        return redirect(back_url(parent, r["ok"] ? "Renombrado." : "", r["error"]), 303)
+
+    post endpoint("/files/:node_id/move", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+
+        Json target = null
+        string target_id = form("target_id", "").trim()
+        if target_id != "":
+            target = await get_node(target_id)
+            Json ta = await authz(p, target, "write", cf)
+            if not (target["owner_id"] == node["owner_id"]):
+                abort(400, "Mover entre cuentas no está soportado; usa copiar.")
+        Json r = await move_node(node, target)
+        return redirect(back_url(target, r["ok"] ? "Movido." : "", r["error"]), 303)
+
+    post endpoint("/files/:node_id/copy", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "upload", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+
+        Json target = null
+        string target_id = form("target_id", "").trim()
+        if target_id != "":
+            target = await get_node(target_id)
+            Json ta = await authz(p, target, "write", cf)
+
+        await sqlite.begin()
+        Json r = await copy_node(node, target, p["user"], cf, 0)
+        if r["ok"]:
+            await sqlite.commit()
+            return redirect(back_url(target, "Copiado.", ""), 303)
+        await sqlite.rollback()
+        return redirect(back_url(target, "", r["error"]), 303)
+
+    post endpoint("/files/:node_id/trash", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "delete", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+        Json parent = await get_node(node["parent_id"])
+
+        await sqlite.begin()
+        await trash_node(node, cf)
+        await audit_record(cf, "delete", p, "node", node["id"], { "name": node["name"], "permanent": false })
+        await sqlite.commit()
+        return redirect(back_url(parent, "Enviado a la papelera.", ""), 303)
+
+    post endpoint("/files/:node_id/restore", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+
+        await sqlite.begin()
+        string problem = await restore_node(node, cf)
+        if problem != "":
+            await sqlite.rollback()
+            return redirect(with_params("/trash", { "error": problem }), 303)
+        await sqlite.commit()
+        return redirect(with_params("/trash", { "ok": "Restaurado" }), 303)
+
+    post endpoint("/files/:node_id/purge", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "delete", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "owner", cf)
+
+        await sqlite.begin()
+        await audit_record(cf, "delete", p, "node", node["id"], { "name": node["name"], "permanent": true })
+        await purge_node(node, cf)
+        await sqlite.commit()
+        return redirect(with_params("/trash", { "ok": "Eliminado definitivamente" }), 303)
+
+    post endpoint("/trash/empty"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        allow(p, "delete", cf)
+
+        await sqlite.begin()
+        int count = await empty_trash(p["user"]["id"], cf)
+        await audit_record(cf, "delete", p, "trash", "", { "count": count })
+        await sqlite.commit()
+        return redirect(with_params("/trash", { "ok": str(count) + " elemento(s) eliminados" }), 303)
+
+    post endpoint("/files/:node_id/star", string node_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+        await sqlite.exec("update nodes set starred = ? where id = ?", node["starred"] == 1 ? 0 : 1, node["id"])
+        return redirect(back_url(await get_node(node["parent_id"]), "", ""), 303)
+
+    post endpoint("/files/:node_id/versions/:version_id/restore", string node_id, string version_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+        Json version = first(await sqlite.query("select * from node_versions where id = ? and node_id = ?", version_id, node["id"]))
+        if not (version != null):
+            abort(404, "Esa versión no existe.")
+
+        await sqlite.begin()
+        await restore_version(node, version, node["owner_id"], cf)
+        await sqlite.commit()
+        return redirect(with_params("/files/" + node["id"] + "/detail", { "ok": "Versión restaurada" }), 303)

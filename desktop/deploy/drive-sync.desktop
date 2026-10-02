@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Drive Sync
+Comment=Sincroniza carpetas con Drive
+Exec=drive-sync
+Icon=drive-sync
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=drive;sync;sincronizar;

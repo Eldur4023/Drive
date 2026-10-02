@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ current.name if current else 'Contenido público' }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/browse">Público</a>
+  {% for crumb in breadcrumbs %}
+    <span class="sep">/</span><a href="/browse?node_id={{ crumb.id }}">{{ crumb.name }}</a>
+  {% endfor %}
+</div>
+
+{% if not current and principal and principal.trusted_network and config.network.trusted_mode != 'none' %}
+  <div class="notice ok">
+    Estás en una red de confianza: ves también el contenido que el administrador
+    ha abierto a la red local.
+    {% if config.network.trusted_mode == 'readonly' %}El acceso es de sólo lectura.{% endif %}
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ current.name if current else 'Contenido accesible sin cuenta' }}</h2>
+
+  {% if not items %}
+    <p class="muted">
+      No hay nada disponible aquí.
+      {% if not principal or not principal.is_authenticated %}
+        <a href="/login">Inicia sesión</a> para ver tus ficheros.
+      {% endif %}
+    </p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item|icon }}</span>
+              <a href="{{ '/browse?node_id=' ~ item.id if item.is_dir else '/p/' ~ item.id }}">{{ item.name }}</a>
+              {% if item.is_public %}<span class="tag public">público</span>{% endif %}
+              {% if item.lan_visible %}<span class="tag lan">red local</span>{% endif %}
+            </div>
+          </td>
+          <td class="hide-sm">{{ '—' if item.is_dir else item.size|size }}</td>
+          <td class="right">
+            {% if not item.is_dir %}
+              <a class="button small" href="/p/{{ item.id }}/download">Descargar</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

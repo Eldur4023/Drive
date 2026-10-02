@@ -1,0 +1,239 @@
+# Sesiones, login y construcción del principal de cada petición.
+#
+# Las sesiones viven en la base de datos (no en la cookie firmada de Lux) para
+# poder revocarlas una a una, listarlas en el perfil y renovarlas de forma
+# deslizante. La cookie sólo lleva un token aleatorio; en la tabla se guarda su
+# hash.
+
+# ── Bloqueo por intentos fallidos ───────────────────────────────────────────
+
+fn bool record_attempt(string key, bool success):
+    await sqlite.exec("insert into login_attempts (key, at, success) values (?, ?, ?)", key, time.now(), success ? 1 : 0)
+    return true
+
+# Fallos consecutivos desde el último acierto dentro de la ventana.
+fn int recent_failures(string key, int window):
+    long since = time.now() - window * 1000
+    List<Json> rows = await sqlite.query("select success from login_attempts where key = ? and at >= ? order by at, id", key, since)
+    int failures = 0
+    for Json r in rows:
+        failures = r["success"] == 1 ? 0 : failures + 1
+    return failures
+
+fn bool clear_attempts(string key):
+    await sqlite.exec("delete from login_attempts where key = ?", key)
+    return true
+
+# ¿Está bloqueada esta clave ("user:x" o "ip:y")?
+fn bool is_locked_out(string key, Json cf):
+    if not cf["security.lockout.enabled"]:
+        return false
+    int window = cf["security.lockout.window"] == null ? 900 : cf["security.lockout.window"]
+    return await recent_failures(key, window) >= cf["security.lockout.max_attempts"]
+
+# ── Login ───────────────────────────────────────────────────────────────────
+
+fn Json find_user(string identifier, Json cf):
+    string ident = identifier.trim()
+    Json user = await get_user_by_name(ident)
+    if user == null and cf["auth.allow_email_login"] and ident.contains("@"):
+        user = first(await sqlite.query("select * from users where email = ?", ident.lower()))
+    return user
+
+fn string dummy_hash(Json cf):
+    Json h = state.get("dummy_hash", null)
+    if h == null:
+        h = await hash_password("dummy", cf)
+        state.set("dummy_hash", h)
+    return h
+
+fn Json auth_fail(string message, int retry):
+    return { "ok": false, "message": message, "retry_after": retry, "user": null }
+
+# Valida credenciales. {"ok": true, "user": fila} o {"ok": false, "message": ...}.
+fn Json authenticate(string identifier, string password, string ip, Json cf):
+    string user_key = "user:" + identifier.trim().lower()
+    string ip_key = ip == "" ? "" : "ip:" + ip
+    bool track_ip = ip_key != "" and cf["security.lockout.track_by_ip"]
+
+    bool locked = await is_locked_out(user_key, cf)
+    if not locked and track_ip:
+        locked = await is_locked_out(ip_key, cf)
+    if locked:
+        return auth_fail("Demasiados intentos fallidos. Prueba de nuevo más tarde.", cf["security.lockout.duration"] == null ? 1800 : cf["security.lockout.duration"])
+
+    Json user = await find_user(identifier, cf)
+    # Se verifica siempre un hash, exista el usuario o no, para que el tiempo
+    # de respuesta no revele qué cuentas existen.
+    string stored = ""
+    if user == null:
+        stored = await dummy_hash(cf)
+    else:
+        stored = user["password_hash"]
+    bool ok = await verify_password(password, stored)
+
+    if user == null or not ok:
+        await record_attempt(user_key, false)
+        if track_ip:
+            await record_attempt(ip_key, false)
+        return auth_fail("Usuario o contraseña incorrectos.", 0)
+
+    if user["locked_until"] != null and user["locked_until"] > time.now():
+        return auth_fail("Esta cuenta está bloqueada temporalmente.", 0)
+    if user["is_active"] != 1:
+        return auth_fail("Esta cuenta está desactivada.", 0)
+    if user["is_approved"] != 1:
+        return auth_fail("Esta cuenta está pendiente de aprobación por un administrador.", 0)
+
+    await record_attempt(user_key, true)
+    await clear_attempts(user_key)
+    if ip_key != "":
+        await clear_attempts(ip_key)
+
+    if needs_rehash(user["password_hash"], cf):
+        await sqlite.exec("update users set password_hash = ? where id = ?", await hash_password(password, cf), user["id"])
+
+    await sqlite.exec("update users set last_login_at = ? where id = ?", time.now(), user["id"])
+    return { "ok": true, "message": "", "retry_after": 0, "user": user }
+
+# ── Sesiones ────────────────────────────────────────────────────────────────
+
+fn int session_lifetime(Json cf):
+    return cf["security.session.lifetime"] == null ? 604800 : cf["security.session.lifetime"]
+
+# Crea una sesión y devuelve el token en claro (sólo se ve aquí).
+fn string create_session(Json user, Json cf, bool from_trusted, bool pending_totp):
+    string raw = generate_token(48)
+    long now = time.now()
+    Json absolute = null
+    if cf["security.session.absolute_lifetime"]:
+        absolute = now + cf["security.session.absolute_lifetime"] * 1000
+    await sqlite.exec(
+        "insert into sessions (id, user_id, created_at, last_seen_at, expires_at, absolute_expires_at, ip, user_agent, revoked, from_trusted_network, pending_totp) values (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+        hash_token(raw), user["id"], now, now, now + session_lifetime(cf) * 1000, absolute,
+        client_ip(cf), header("User-Agent", "").slice(0, 255),
+        from_trusted ? 1 : 0, pending_totp ? 1 : 0)
+    return raw
+
+# Sesión válida de una cookie, renovando su caducidad (deslizante, sin pasar del
+# tope absoluto), o null.
+fn Json load_session(string raw, Json cf):
+    Json s = first(await sqlite.query("select * from sessions where id = ?", hash_token(raw)))
+    if s == null or s["revoked"] == 1:
+        return null
+    long now = time.now()
+    if s["expires_at"] <= now:
+        return null
+    if s["absolute_expires_at"] != null and s["absolute_expires_at"] <= now:
+        return null
+
+    long expiry = now + session_lifetime(cf) * 1000
+    if s["absolute_expires_at"] != null and s["absolute_expires_at"] < expiry:
+        expiry = s["absolute_expires_at"]
+    await sqlite.exec("update sessions set last_seen_at = ?, expires_at = ? where id = ?", now, expiry, s["id"])
+    s["last_seen_at"] = now
+    s["expires_at"] = expiry
+    return s
+
+fn bool revoke_session(string session_id):
+    await sqlite.exec("update sessions set revoked = 1 where id = ?", session_id)
+    return true
+
+# Cierra todas las sesiones de un usuario salvo `except_id` ("" = ninguna).
+fn int revoke_all_sessions(string user_id, string except_id):
+    return await sqlite.exec("update sessions set revoked = 1 where user_id = ? and revoked = 0 and id != ?", user_id, except_id)
+
+# Sesión a medio autenticar (falta el segundo factor) de la cookie actual.
+fn Json pending_session(Json cf):
+    string raw = cookie(cf["security.session.cookie_name"], "")
+    if raw == "":
+        return null
+    Json s = await load_session(raw, cf)
+    if s != null and s["pending_totp"] == 1:
+        return s
+    return null
+
+# ── Tokens de API ───────────────────────────────────────────────────────────
+
+fn Json load_api_token(string raw):
+    Json t = first(await sqlite.query("select * from api_tokens where token_hash = ?", hash_token(raw)))
+    if t == null or t["revoked"] == 1:
+        return null
+    if t["expires_at"] != null and t["expires_at"] <= time.now():
+        return null
+    await sqlite.exec("update api_tokens set last_used_at = ? where id = ?", time.now(), t["id"])
+    return t
+
+# ── Principal ───────────────────────────────────────────────────────────────
+
+fn Json new_principal(string ip, bool trusted):
+    return { "kind": "anonymous", "user": null, "session_id": null, "ip": ip, "denied": false, "trusted_network": trusted, "link": null, "scopes": [], "readonly": true }
+
+fn bool user_usable(Json user):
+    return user != null and user["is_active"] == 1 and user["is_approved"] == 1
+
+# Identifica al autor de la petición combinando todas las vías de acceso:
+# token de API, cookie de sesión, red de confianza y, si nada de eso, anónimo.
+fn Json get_principal(Json cf):
+    string ip = client_ip(cf)
+    Json p = new_principal(ip, false)
+    if is_denied_network(ip, cf):
+        p["denied"] = true
+        return p
+
+    bool trusted = is_trusted_network(ip, cf)
+    p["trusted_network"] = trusted
+
+    # 1. Token de API por cabecera.
+    string authorization = header("Authorization", "")
+    if authorization.lower().starts_with("bearer "):
+        Json token = await load_api_token(authorization.slice(7).trim())
+        if token != null:
+            Json user = await get_user(token["user_id"])
+            if user_usable(user):
+                Json scopes = parse_json_text(token["scopes"], [])
+                p["kind"] = "token"
+                p["user"] = user
+                p["scopes"] = scopes
+                p["readonly"] = not scopes.contains("write")
+                return p
+
+    # 2. Cookie de sesión.
+    string raw = cookie(cf["security.session.cookie_name"], "")
+    if raw != "":
+        Json session = await load_session(raw, cf)
+        if session != null and session["pending_totp"] != 1:
+            Json user = await get_user(session["user_id"])
+            bool ip_changed = session["ip"] != null and ip != session["ip"]
+            if ip_changed and not cf["network.allow_session_ip_change"]:
+                await revoke_session(session["id"])
+            elif user_usable(user):
+                bool from_net = session["from_trusted_network"] == 1
+                p["kind"] = from_net ? "network" : "user"
+                p["user"] = user
+                p["session_id"] = session["id"]
+                p["readonly"] = from_net and cf["network.trusted_mode"] == "readonly"
+                return p
+
+    # 3. Red de confianza sin sesión: se suplanta al usuario configurado.
+    if trusted and cf["network.trusted_mode"] == "full" and cf["network.trusted_user"]:
+        Json tuser = await get_user_by_name(str(cf["network.trusted_user"]))
+        if tuser != null and tuser["is_active"] == 1:
+            p["kind"] = "network"
+            p["user"] = tuser
+            p["readonly"] = false
+            return p
+
+    # 4. Anónimo. Sigue pudiendo ver lo público y, si la política lo permite,
+    #    lo que la red de confianza abra.
+    if trusted and cf["network.trusted_mode"] != "none":
+        p["readonly"] = cf["network.trusted_mode"] == "readonly"
+    return p
+
+# Principal de quien entra por un enlace con token.
+fn Json link_principal(Json base, Json link):
+    Json p = new_principal(base["ip"], base["trusted_network"])
+    p["kind"] = "link"
+    p["link"] = link
+    p["readonly"] = link["mode"] == "download"
+    return p

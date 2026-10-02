@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}{{ c["current_id"] == "" ? "Contenido público" : c["current_name"] }} · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/browse">Público</a>
+  {% for crumb in c["breadcrumbs"] %}
+    <span class="sep">/</span><a href="/browse?node_id={{ crumb["id"] }}">{{ crumb["name"] }}</a>
+  {% endfor %}
+</div>
+
+{% if c["current_id"] == "" and c["trusted_network"] and c["cf"]["network.trusted_mode"] != "none" %}
+  <div class="notice ok">
+    Estás en una red de confianza: ves también el contenido que el administrador
+    ha abierto a la red local.
+    {% if c["cf"]["network.trusted_mode"] == "readonly" %}El acceso es de sólo lectura.{% endif %}
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ c["current_id"] == "" ? "Contenido accesible sin cuenta" : c["current_name"] }}</h2>
+
+  {% if len(c["items"]) == 0 %}
+    <p class="muted">
+      No hay nada disponible aquí.
+      {% if not c["auth"] %}
+        <a href="/login">Inicia sesión</a> para ver tus ficheros.
+      {% endif %}
+    </p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for item in c["items"] %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item["icon"] }}</span>
+              <a href="{{ item["is_dir"] == 1 ? "/browse?node_id=" + item["id"] : "/p/" + item["id"] }}">{{ item["name"] }}</a>
+              {% if item["is_public"] == 1 %}<span class="tag public">público</span>{% endif %}
+              {% if item["lan_visible"] == 1 %}<span class="tag lan">red local</span>{% endif %}
+            </div>
+          </td>
+          <td class="hide-sm">{{ item["size_h"] }}</td>
+          <td class="right">
+            {% if item["is_dir"] != 1 %}
+              <a class="button small" href="/p/{{ item["id"] }}/download">Descargar</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

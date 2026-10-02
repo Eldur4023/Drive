@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Verificación · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="card">
+    <h1>Segundo factor</h1>
+    <p class="muted">Introduce el código de seis dígitos de tu aplicación de autenticación.</p>
+    <form method="post" action="/2fa">
+      <input type="hidden" name="next" value="{{ c["next"] }}">
+      <div class="field">
+        <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*"
+               maxlength="9" required autofocus style="width:100%; font-size:22px; letter-spacing:.25em; text-align:center">
+      </div>
+      <button class="primary" type="submit" style="width:100%">Verificar</button>
+    </form>
+    <form method="post" action="/logout" style="margin-top:14px"><button class="link">Cancelar y salir</button></form>
+  </div>
+</div>
+{% endblock %}

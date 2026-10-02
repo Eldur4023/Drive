@@ -1,0 +1,53 @@
+{
+  "app": {
+    "base_url": "http://testserver"
+  },
+  "security": {
+    "secret_key": "clave-de-pruebas-suficientemente-larga-0123456789",
+    "password_policy": {
+      "min_length": 8,
+      "require_symbol": false
+    },
+    "totp": {
+      "enabled": true,
+      "required_for_roles": []
+    }
+  },
+  "auth": {
+    "registration_enabled": true,
+    "require_admin_approval": false
+  },
+  "rate_limit": {
+    "enabled": true,
+    "login": {
+      "requests": 3,
+      "window": "5m"
+    },
+    "download": {
+      "requests": 2,
+      "window": "1m"
+    },
+    "exempt_networks": []
+  },
+  "maintenance": {
+    "enabled": false
+  },
+  "network": {
+    "trusted_networks": [],
+    "trusted_mode": "none"
+  },
+  "server": {
+    "behind_proxy": true,
+    "trusted_proxies": [
+      "127.0.0.1/32"
+    ]
+  },
+  "audit": {
+    "enabled": true
+  },
+  "storage": {
+    "blocked_extensions": [
+      ".exe"
+    ]
+  }
+}

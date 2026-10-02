@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Buscar · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>Resultados</h2>
+  <form method="get" action="/search" class="row">
+    <input type="search" name="q" value="{{ c["q"] }}" placeholder="Buscar por nombre…" autofocus>
+    <button class="primary" type="submit">Buscar</button>
+  </form>
+
+  {% if c["q"] != "" and len(c["items"]) == 0 %}
+    <p class="muted" style="margin-top:14px">Nada coincide con «{{ c["q"] }}».</p>
+  {% elif len(c["items"]) > 0 %}
+  <div class="table-wrap" style="margin-top:14px">
+    <table>
+      <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th class="hide-sm">Modificado</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for item in c["items"] %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item["icon"] }}</span>
+              <a href="{{ item["href"] }}">{{ item["name"] }}</a>
+            </div>
+          </td>
+          <td class="hide-sm">{{ item["size_h"] }}</td>
+          <td class="hide-sm muted">{{ item["updated_rel"] }}</td>
+          <td class="right">
+            {% if item["is_dir"] != 1 %}<a class="button small" href="/files/{{ item["id"] }}/download">Descargar</a>{% endif %}
+            <a class="button small" href="/files/{{ item["id"] }}/detail">Detalles</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

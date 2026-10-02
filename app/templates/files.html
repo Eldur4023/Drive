@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}{{ current.name if current else 'Mis ficheros' }} · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="breadcrumbs">
+  <a href="/files">Mis ficheros</a>
+  {% for crumb in breadcrumbs %}
+    <span class="sep">/</span><a href="/files/{{ crumb.id }}">{{ crumb.name }}</a>
+  {% endfor %}
+</div>
+
+<div class="page-head">
+  <h1>{{ current.name if current else 'Mis ficheros' }}</h1>
+  {% if can.upload %}
+  <div class="toolbar">
+    <button type="button" data-prompt-open><svg class="ico"><use href="#i-folder-plus"/></svg>Nueva carpeta</button>
+    <button type="button" data-pick-dir title="El sistema deja elegir una carpeta cada vez: pulsa otra vez para añadir más, o arrastra varias a la vez"><svg class="ico"><use href="#i-folder"/></svg>Subir carpeta</button>
+    <button type="button" class="primary" data-pick><svg class="ico"><use href="#i-upload"/></svg>Subir ficheros</button>
+  </div>
+  {% endif %}
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Subir ficheros</h2>
+    {% if can.upload %}
+      <form method="post" action="/files/upload" enctype="multipart/form-data">
+        <input type="hidden" name="parent_id" value="{{ current.id if current else '' }}">
+        <div class="dropzone" data-dropzone data-auto>
+          <input type="file" name="files" multiple aria-label="Elegir ficheros">
+          <span class="dz-icon"><svg class="ico"><use href="#i-upload"/></svg></span>
+          <span class="dz-title">Arrastra ficheros o carpetas aquí</span>
+          <p class="muted">o pulsa para elegirlos en tu equipo</p>
+          <p class="picked"></p>
+        </div>
+        <div class="field inline" style="margin-top:14px">
+          <input type="checkbox" id="overwrite" name="overwrite" value="true">
+          <label for="overwrite">Sobrescribir si ya existe (guarda la versión anterior)</label>
+        </div>
+        <noscript><button class="primary" type="submit">Subir</button></noscript>
+      </form>
+    {% else %}
+      <p class="muted">Tu perfil actual no permite subir ficheros.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Espacio</h2>
+    <p class="spread" style="margin:0 0 10px">
+      <span><b>{{ usage.used|size }}</b> usados{% if not usage.unlimited %} de {{ usage.quota|size }}{% endif %}</span>
+      <span class="muted">{{ usage.percent }}%</span>
+    </p>
+    <div class="meter {% if usage.percent > 90 %}full{% endif %}"><span style="width: {{ usage.percent }}%"></span></div>
+
+    {% if can.upload %}
+      <form method="post" action="/files/mkdir" class="row" style="margin-top:20px" data-prompt-form>
+        <input type="hidden" name="parent_id" value="{{ current.id if current else '' }}">
+        <input name="name" placeholder="Nueva carpeta" required style="flex:1;min-width:0">
+        <button type="submit"><svg class="ico"><use href="#i-folder-plus"/></svg>Crear</button>
+      </form>
+    {% endif %}
+    <p class="muted" style="margin:16px 0 0">
+      <svg class="ico"><use href="#i-users"/></svg>
+      {{ shared_count }} elemento(s) compartidos contigo · <a href="/shared">ver</a>
+    </p>
+  </div>
+</div>
+
+<div class="card files" data-files>
+  <div class="spread" style="margin-bottom:8px">
+    <h2 style="margin:0">{{ current.name if current else 'Raíz' }}</h2>
+    <div class="toolbar">
+      <form method="get" class="row" style="gap:8px">
+        <label for="order" style="margin:0">Ordenar</label>
+        <select id="order" name="order" data-autosubmit>
+          <option value="name" {% if order=='name' %}selected{% endif %}>Nombre</option>
+          <option value="size" {% if order=='size' %}selected{% endif %}>Tamaño</option>
+          <option value="modified" {% if order=='modified' %}selected{% endif %}>Modificación</option>
+          <option value="created" {% if order=='created' %}selected{% endif %}>Creación</option>
+        </select>
+        <noscript><button type="submit" class="small">Aplicar</button></noscript>
+      </form>
+      <div class="seg" role="group" aria-label="Vista">
+        <button type="button" data-view="list" aria-pressed="true" title="Lista"><svg class="ico"><use href="#i-list"/></svg></button>
+        <button type="button" data-view="grid" aria-pressed="false" title="Cuadrícula"><svg class="ico"><use href="#i-grid"/></svg></button>
+      </div>
+    </div>
+  </div>
+
+  {% if not items %}
+    <div class="empty">
+      <svg class="ico"><use href="#i-folder"/></svg>
+      <p style="margin:0">Esta carpeta está vacía.</p>
+      {% if can.upload %}<p class="muted" style="margin:4px 0 0">Arrastra ficheros o carpetas a cualquier parte de la página para subirlos.</p>{% endif %}
+    </div>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Nombre</th>
+          <th class="hide-sm">Tamaño</th>
+          <th class="hide-sm">Modificado</th>
+          <th class="right"></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for item in items %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              {% if config.thumbnails.enabled and not item.is_dir and item.mime_type and item.mime_type.startswith('image/') %}
+                <img class="thumb" loading="lazy" src="/files/{{ item.id }}/thumb" alt="">
+              {% endif %}{{ item|icon }}
+              <a href="{{ '/files/' ~ item.id if item.is_dir else '/files/' ~ item.id ~ '/detail' }}">{{ item.name }}</a>
+              {% if item.is_public %}<span class="tag public"><svg class="ico"><use href="#i-globe"/></svg>público</span>{% endif %}
+              {% if item.lan_visible %}<span class="tag lan"><svg class="ico"><use href="#i-wifi"/></svg>red local</span>{% endif %}
+              {% if item.starred %}<svg class="ico" style="color:var(--k-folder);fill:currentColor" title="Destacado"><use href="#i-star"/></svg>{% endif %}
+            </div>
+          </td>
+          <td class="hide-sm muted">{{ '—' if item.is_dir else item.size|size }}</td>
+          <td class="hide-sm muted">{{ item.updated_at|relative }}</td>
+          <td class="right">
+            <div class="row-actions">
+              {% if not item.is_dir %}
+                <a class="button small ghost icon" href="/files/{{ item.id }}/download" title="Descargar" aria-label="Descargar"><svg class="ico"><use href="#i-download"/></svg></a>
+              {% endif %}
+              <a class="button small ghost icon" href="/files/{{ item.id }}/detail" title="Detalles" aria-label="Detalles"><svg class="ico"><use href="#i-info"/></svg></a>
+              {% if can.delete %}
+                <form class="inline" method="post" action="/files/{{ item.id }}/trash"
+                      data-confirm="¿Enviar «{{ item.name }}» a la papelera?">
+                  <button class="small ghost icon danger" type="submit" title="Borrar" aria-label="Borrar"><svg class="ico"><use href="#i-trash"/></svg></button>
+                </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

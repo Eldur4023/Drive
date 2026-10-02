@@ -1,0 +1,59 @@
+# Tareas periódicas de limpieza.
+#
+# Se ejecutan dentro del propio proceso: no hace falta cron ni un worker
+# externo. Lux fija el calendario de un `every` al compilar, así que el
+# intervalo configurable (maintenance.interval) se respeta despertando cada
+# minuto y comprobando cuánto ha pasado desde la última pasada.
+
+# Ejecuta una pasada de limpieza y devuelve lo que ha borrado.
+fn Json maintenance_run(Json cf):
+    Json result = { "trash": 0, "versions": 0, "sessions": 0, "audit": 0, "blobs": 0 }
+
+    if cf["maintenance.purge_trash"]:
+        result["trash"] = await purge_expired_trash(cf)
+
+    if cf["maintenance.purge_versions"] and cf["versions.retention"]:
+        long cutoff = time.now() - cf["versions.retention"] * 1000
+        int removed = 0
+        for Json v in await sqlite.query("select * from node_versions where created_at < ?", cutoff):
+            Json node = await get_node(v["node_id"])
+            await release_blob(v["blob_hash"], cf)
+            if node != null:
+                await charge(node["owner_id"], 0 - v["size"])
+            await sqlite.exec("delete from node_versions where id = ?", v["id"])
+            removed = removed + 1
+        result["versions"] = removed
+
+    if cf["maintenance.purge_sessions"]:
+        result["sessions"] = await sqlite.exec("delete from sessions where expires_at < ? or revoked = 1", time.now())
+
+    if cf["maintenance.purge_audit"]:
+        result["audit"] = await audit_purge(cf)
+
+    if cf["maintenance.purge_orphan_blobs"]:
+        result["blobs"] = await purge_orphan_blobs(cf)
+
+    return result
+
+fn bool maintenance_nonzero(Json result):
+    for string k in result:
+        if result[k] != 0:
+            return true
+    return false
+
+every "1m":
+    Json cf = await config()
+    if cf["maintenance.enabled"]:
+        long last = state.get("maintenance_last", 0)
+        if last == 0:
+            # La primera vez se espera un intervalo entero, para no competir con
+            # el arranque del servidor.
+            state.set("maintenance_last", time.now())
+        elif time.now() - last >= cf["maintenance.interval"] * 1000:
+            state.set("maintenance_last", time.now())
+            try:
+                Json result = await maintenance_run(cf)
+                if maintenance_nonzero(result):
+                    log.info("mantenimiento: " + json.stringify(result))
+            catch e:
+                log.error("fallo en la tarea de mantenimiento: " + e.message)

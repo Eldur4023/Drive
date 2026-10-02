@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Buscar · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>Resultados</h2>
+  <form method="get" action="/search" class="row">
+    <input type="search" name="q" value="{{ q }}" placeholder="Buscar por nombre…" autofocus>
+    <button class="primary" type="submit">Buscar</button>
+  </form>
+
+  {% if q and not items %}
+    <p class="muted" style="margin-top:14px">Nada coincide con «{{ q }}».</p>
+  {% elif items %}
+  <div class="table-wrap" style="margin-top:14px">
+    <table>
+      <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th class="hide-sm">Modificado</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item|icon }}</span>
+              <a href="{{ '/files/' ~ item.id if item.is_dir else '/files/' ~ item.id ~ '/detail' }}">{{ item.name }}</a>
+            </div>
+          </td>
+          <td class="hide-sm">{{ '—' if item.is_dir else item.size|size }}</td>
+          <td class="hide-sm muted">{{ item.updated_at|relative }}</td>
+          <td class="right">
+            {% if not item.is_dir %}<a class="button small" href="/files/{{ item.id }}/download">Descargar</a>{% endif %}
+            <a class="button small" href="/files/{{ item.id }}/detail">Detalles</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

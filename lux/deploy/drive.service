@@ -1,0 +1,50 @@
+[Unit]
+Description=Drive — almacenamiento de ficheros autoalojado (Lux)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=drive
+Group=drive
+WorkingDirectory=/opt/drive
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="DRIVE_CONFIG=/opt/drive/config/config.json"
+
+# El secreto de firma, el puerto y las rutas de datos se leen de aquí. Es el
+# único sitio que hay que tocar para cambiar dónde y cómo escucha el servicio.
+EnvironmentFile=/etc/drive/drive.env
+
+# El lanzador monta los argumentos de Lux a partir de ese fichero.
+ExecStart=/opt/drive/run.sh
+
+Restart=on-failure
+RestartSec=5
+
+# Lux escucha sólo en 127.0.0.1 (app: host); nginx es quien lo expone.
+
+# --- Endurecimiento -------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Los blobs se guardan sin permisos para "otros".
+UMask=0027
+
+# Únicos directorios en los que el servicio puede escribir.
+ReadWritePaths=/var/lib/drive
+StateDirectory=drive
+
+# Límites: las subidas abren muchos descriptores y cada hilo de Lux, un bucle.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

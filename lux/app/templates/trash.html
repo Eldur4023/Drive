@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Papelera · {{ c["app_name"] }}{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">Papelera</h2>
+    {% if len(c["items"]) > 0 and c["can"]["delete"] %}
+      <form method="post" action="/trash/empty" data-confirm="¿Vaciar la papelera? Esto no se puede deshacer.">
+        <button class="danger" type="submit">Vaciar papelera</button>
+      </form>
+    {% endif %}
+  </div>
+  <p class="muted">
+    {% if c["cf"]["trash.enabled"] %}
+      Lo borrado se elimina automáticamente pasados {{ c["retention_text"] }}.
+    {% else %}
+      La papelera está desactivada: los borrados son inmediatos y definitivos.
+    {% endif %}
+  </p>
+
+  {% if len(c["items"]) == 0 %}
+    <p class="muted">No hay nada en la papelera.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Nombre</th><th class="hide-sm">Tamaño</th><th>Borrado</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for item in c["items"] %}
+        <tr>
+          <td>
+            <div class="name-cell">
+              <span class="icon">{{ item["icon"] }}</span>
+              <span>{{ item["name"] }}</span>
+            </div>
+          </td>
+          <td class="hide-sm">{{ item["size_h"] }}</td>
+          <td class="muted">{{ item["deleted_rel"] }}</td>
+          <td class="right">
+            <form class="inline" method="post" action="/files/{{ item["id"] }}/restore">
+              <button class="small" type="submit">Restaurar</button>
+            </form>
+            <form class="inline" method="post" action="/files/{{ item["id"] }}/purge"
+                  data-confirm="¿Eliminar «{{ item["name"] }}» definitivamente?">
+              <button class="small danger" type="submit">Eliminar</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

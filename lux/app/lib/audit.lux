@@ -1,0 +1,31 @@
+# Registro de auditoría.
+
+# Anota un evento si está en la lista de eventos auditados. `principal` puede
+# ser null. `target_type`/`target_id` pueden ser "" y `detail` cualquier Json.
+# Dentro de una transacción abierta se une a ella: si la acción se deshace, su
+# rastro también.
+fn bool audit_record(Json cf, string event, Json principal, string target_type, string target_id, Json detail):
+    if not cf["audit.enabled"] or not in_list(event, cf["audit.events"]):
+        return false
+    Json user_id = null
+    Json actor = null
+    Json ip = null
+    if principal != null:
+        user_id = principal["user"] == null ? null : principal["user"]["id"]
+        actor = principal_label(principal)
+        if cf["audit.store_ip"] and principal["ip"] != null and principal["ip"] != "":
+            ip = principal["ip"]
+    await sqlite.exec(
+        "insert into audit_log (at, event, user_id, actor, ip, target_type, target_id, detail) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        time.now(), event, user_id, actor, ip,
+        target_type == "" ? null : target_type,
+        target_id == "" ? null : target_id,
+        json.stringify(detail))
+    return true
+
+# Borra los registros más antiguos que la retención configurada.
+fn int audit_purge(Json cf):
+    if not cf["audit.retention"]:
+        return 0
+    long cutoff = time.now() - cf["audit.retention"] * 1000
+    return await sqlite.exec("delete from audit_log where at < ?", cutoff)

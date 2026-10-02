@@ -1,0 +1,122 @@
+# Almacenamiento físico de los ficheros.
+#
+# El contenido vive fuera del árbol lógico: cada fichero se guarda una sola vez
+# bajo <root>/ab/cd/<hash> y la jerarquía de carpetas existe únicamente en la
+# base de datos. Así los nombres que escribe el usuario nunca llegan al sistema
+# de ficheros, no hay path traversal posible, y dos copias del mismo contenido
+# comparten un solo blob.
+
+# ── Rutas ───────────────────────────────────────────────────────────────────
+
+fn string storage_root(Json cf):
+    string root = cf["storage.root"]
+    os.make_dir(root)
+    return root
+
+fn string blob_path(string digest, Json cf):
+    return os.path_join(cf["storage.root"], digest.slice(0, 2), digest.slice(2, 4), digest)
+
+fn string thumb_path(string digest, int size, Json cf):
+    string base = os.path_join(os.path_dirname(cf["storage.root"]), "thumbs", str(size))
+    return os.path_join(base, digest.slice(0, 2), digest.slice(2, 4), digest + ".webp")
+
+# ── Validación previa ───────────────────────────────────────────────────────
+
+# Aplica las listas negra y blanca de extensiones y de tipos MIME. Devuelve el
+# motivo del rechazo, o "" si el nombre vale.
+fn string check_filename(string filename, Json cf):
+    string ext = ext_of(filename)
+    List<Json> allowed = cf["storage.allowed_extensions"]
+    if len(allowed) > 0 and not in_list(ext, allowed):
+        List<string> names = []
+        for Json a in allowed:
+            names.add(str(a))
+        return "Sólo se admiten estos tipos de fichero: " + names.join(", ")
+    if in_list(ext, cf["storage.blocked_extensions"]):
+        return "Los ficheros «" + ext + "» no están permitidos."
+    if len(cf["storage.blocked_mime_types"]) > 0 and in_list(guess_mime(filename), cf["storage.blocked_mime_types"]):
+        return "El tipo de este fichero no está permitido."
+    return ""
+
+# ── Escritura ───────────────────────────────────────────────────────────────
+
+# Vuelca un fichero subido a su blob. {"ok": true, "hash", "size", "created"} o
+# {"ok": false, "error": motivo}.
+#
+# Se guarda primero en un directorio temporal único dentro de la misma raíz y se
+# mueve al final: nunca queda un blob a medias con un hash que dice estar
+# completo. El tamaño ya se ha leído entero (Lux no transmite la subida a
+# disco), así que el límite se comprueba antes de guardar.
+fn Json store_upload(File f, Json cf, Json limit):
+    if limit != null and f.size > limit:
+        return { "ok": false, "error": "El fichero supera el máximo permitido (" + format_size(limit) + ")." }
+
+    string root = storage_root(cf)
+    string tmpdir = os.path_join(root, "tmp", new_id())
+    os.make_dir(tmpdir)
+    string saved = f.save(tmpdir)
+    string src = os.path_join(tmpdir, saved)
+    string digest = f.sha256()
+    int size = os.file_size(src)
+
+    string target = blob_path(digest, cf)
+    bool created = false
+    if not os.is_file(target):
+        os.make_dir(os.path_dirname(target))
+        await os.move(src, target)
+        created = true
+    os.remove_dir(tmpdir, true)
+    return { "ok": true, "error": "", "hash": digest, "size": size, "created": created }
+
+# Registra el blob y suma una referencia.
+fn bool acquire_blob(string digest, int size):
+    await sqlite.exec("insert into blobs (hash, size, refcount, created_at) values (?, ?, 1, ?) on conflict(hash) do update set refcount = refcount + 1", digest, size, time.now())
+    return true
+
+fn bool remove_blob_files(string digest, Json cf):
+    string path = blob_path(digest, cf)
+    if os.is_file(path):
+        os.remove_file(path)
+    for Json size in cf["thumbnails.sizes"]:
+        string t = thumb_path(digest, int(size), cf)
+        if os.is_file(t):
+            os.remove_file(t)
+    return true
+
+# Resta una referencia y borra el contenido cuando ya no lo usa nadie. El
+# fichero se elimina en el acto, pero la fila se deja con refcount a cero para
+# que la recoja purge_orphan_blobs: una fila huérfana durante unos minutos no
+# ocupa nada.
+fn bool release_blob(Json digest, Json cf):
+    if digest == null or digest == "":
+        return false
+    await sqlite.exec("update blobs set refcount = refcount - 1 where hash = ?", digest)
+    List<Json> rows = await sqlite.query("select refcount from blobs where hash = ?", digest)
+    if len(rows) > 0 and rows[0]["refcount"] <= 0:
+        try:
+            remove_blob_files(str(digest), cf)
+        catch e:
+            log.warn("no se pudo borrar el blob " + str(digest) + ": " + e.message)
+    return true
+
+# Elimina las filas de blobs que ya no referencia nadie. Recoge tanto lo
+# liberado por release_blob como lo que haya quedado a medias si el proceso
+# murió durante una subida.
+fn int purge_orphan_blobs(Json cf):
+    List<Json> rows = await sqlite.query("select hash from blobs where refcount <= 0")
+    int removed = 0
+    for Json r in rows:
+        try:
+            remove_blob_files(r["hash"], cf)
+        catch e:
+            log.warn("no se pudo borrar el blob " + r["hash"] + ": " + e.message)
+        await sqlite.exec("delete from blobs where hash = ? and refcount <= 0", r["hash"])
+        removed = removed + 1
+    return removed
+
+# ── Utilidades ──────────────────────────────────────────────────────────────
+
+# Espacio usado y total del sistema de ficheros de los blobs: {"used", "total"}.
+fn Json disk_usage(Json cf):
+    Json d = os.disk_usage(storage_root(cf))
+    return { "used": d["used"], "total": d["total"] }

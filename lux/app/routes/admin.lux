@@ -1,0 +1,300 @@
+# Panel de administración: usuarios, ajustes, auditoría y estado.
+
+# Fila de auditoría lista para mostrar.
+fn Json view_audit(Json r, string who, Json cf):
+    string tz = cf["app.timezone"]
+    Json row = {}.merge(r)
+    row["at_h"] = fmt_dt(r["at"], tz, "%d/%m/%Y %H:%M:%S")
+    row["at_rel"] = fmt_rel(r["at"], tz)
+    row["who"] = who
+    row["ip_h"] = r["ip"] == null ? "—" : r["ip"]
+    row["target_h"] = (r["target_type"] == null ? "" : r["target_type"]) + " " + (r["target_id"] == null ? "" : str(r["target_id"]).slice(0, 16))
+    row["detail"] = r["detail"] == "{}" ? "" : r["detail"]
+    return row
+
+# Valor de un campo de formulario urlencoded ya decodificado.
+fn Json form_dict():
+    return encoding.query_decode(request.body)
+
+group("/admin"):
+    require await gate_ok() else text("Acceso no permitido desde tu red.").status(403)
+
+    get endpoint(""):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+
+        Json disk = await disk_usage(cf)
+        int logical = await count_of("select coalesce(sum(size), 0) as n from nodes where is_dir = 0")
+        int physical = await count_of("select coalesce(sum(size), 0) as n from blobs")
+        double percent = disk["total"] > 0 ? math.round(disk["used"] * 100.0 / disk["total"], 1) : 0.0
+        Json stats = {
+            "users": await count_of("select count(*) as n from users"),
+            "pending": await count_of("select count(*) as n from users where is_approved = 0"),
+            "files": await count_of("select count(*) as n from nodes where is_dir = 0"),
+            "public": await count_of("select count(*) as n from nodes where is_public = 1"),
+            "blobs": await count_of("select count(*) as n from blobs"),
+            "sessions": (await sqlite.query("select count(*) as n from sessions where revoked = 0 and expires_at > ?", time.now()))[0]["n"],
+            "logical_h": format_size(logical),
+            "physical_h": format_size(physical),
+            "dedup_saved": logical - physical,
+            "dedup_saved_h": format_size(logical - physical),
+            "disk_used_h": format_size(disk["used"]),
+            "disk_total_h": format_size(disk["total"]),
+            "disk_percent": percent
+        }
+
+        List<Json> recent = []
+        for Json r in await sqlite.query("select * from audit_log order by at desc, id desc limit 15"):
+            recent.add(view_audit(r, r["actor"] == null ? "—" : r["actor"], cf))
+        return render("admin_dashboard.html", c=ctx(cf, p, { "tab": "home", "stats": stats, "warnings": config_warnings(cf), "recent": recent }))
+
+    # ── Usuarios ────────────────────────────────────────────────────────────
+
+    get endpoint("/users"):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+
+        List<Json> users = []
+        for Json u in await sqlite.query("select * from users order by username"):
+            Json row = {}.merge(u)
+            Json usage = usage_of(u, cf)
+            row["label"] = user_label(u)
+            row["usage_h"] = format_size(usage["used"])
+            row["quota_h"] = format_size(usage["quota"])
+            row["unlimited"] = usage["unlimited"]
+            row["quota_override_h"] = u["quota_override"] == null or u["quota_override"] == 0 ? "" : format_size(u["quota_override"])
+            row["max_upload_override_h"] = u["max_upload_override"] == null or u["max_upload_override"] == 0 ? "" : format_size(u["max_upload_override"])
+            Json overrides = parse_json_text(u["permission_overrides"], {})
+            Json ov = {}
+            for string name in ["can_upload", "can_delete", "can_share_internal", "can_share_public"]:
+                ov[name] = overrides.has(name) ? (overrides[name] ? "yes" : "no") : "inherit"
+            row["ov"] = ov
+            users.add(row)
+        return render("admin_users.html", c=ctx(cf, p, { "tab": "users", "users": users, "roles": ["admin", "user", "guest"] }))
+
+    post endpoint("/users"):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+
+        string username = form("username", "").trim()
+        string email = form("email", "").trim().lower()
+        string password = form("password", "")
+        string role = form("role", "user")
+        string quota = form("quota", "").trim()
+
+        if not regex.test("^[A-Za-z0-9._-]+$", username) or len(username) < 3:
+            return redirect(with_params("/admin/users", { "error": "Nombre de usuario no válido." }), 303)
+        if not in_list(role, ["admin", "user", "guest"]):
+            return redirect(with_params("/admin/users", { "error": "Rol no válido." }), 303)
+        if await get_user_by_name(username) != null:
+            return redirect(with_params("/admin/users", { "error": "Ese nombre de usuario ya existe." }), 303)
+        List<string> problems = check_password_policy(password, username, email, cf)
+        if len(problems) > 0:
+            return redirect(with_params("/admin/users", { "error": problems.join(" ") }), 303)
+        Json quota_bytes = null
+        if quota != "":
+            Json q = parse_size(quota)
+            if not q["ok"]:
+                return redirect(with_params("/admin/users", { "error": q["err"] }), 303)
+            quota_bytes = q["v"]
+        if email != "" and len(await sqlite.query("select id from users where email = ?", email)) > 0:
+            return redirect(with_params("/admin/users", { "error": "Ese correo ya está registrado." }), 303)
+
+        long now = time.now()
+        await sqlite.exec(
+            "insert into users (id, username, email, password_hash, role, is_active, is_approved, quota_override, created_at, password_changed_at) values (?, ?, ?, ?, ?, 1, 1, ?, ?, ?)",
+            new_id(), username, email == "" ? null : email, await hash_password(password, cf), role, quota_bytes, now, now)
+        await audit_record(cf, "user_create", p, "user", username, { "role": role })
+        return redirect(with_params("/admin/users", { "ok": "Usuario " + username + " creado." }), 303)
+
+    post endpoint("/users/:user_id", string user_id):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+        Json user = await get_user(user_id)
+        if not (user != null):
+            abort(404, "Ese usuario no existe.")
+
+        string role = form("role", user["role"])
+        bool is_active = truthy(form("is_active", ""))
+        bool is_approved = truthy(form("is_approved", ""))
+        if not in_list(role, ["admin", "user", "guest"]):
+            return redirect(with_params("/admin/users", { "error": "Rol no válido." }), 303)
+
+        # No se permite que el último administrador se degrade o se desactive:
+        # dejaría la instancia sin nadie que pueda administrarla.
+        int admins = await count_of("select count(*) as n from users where role = 'admin' and is_active = 1")
+        bool losing_admin = user["role"] == "admin" and (role != "admin" or not is_active)
+        if losing_admin and admins <= 1:
+            return redirect(with_params("/admin/users", { "error": "Debe quedar al menos un administrador activo." }), 303)
+
+        Json quota_bytes = null
+        Json max_upload = null
+        if form("quota", "").trim() != "":
+            Json q = parse_size(form("quota", ""))
+            if not q["ok"]:
+                return redirect(with_params("/admin/users", { "error": q["err"] }), 303)
+            quota_bytes = q["v"]
+        if form("max_upload", "").trim() != "":
+            Json m = parse_size(form("max_upload", ""))
+            if not m["ok"]:
+                return redirect(with_params("/admin/users", { "error": m["err"] }), 303)
+            max_upload = m["v"]
+
+        Json overrides = {}
+        for string name in ["can_upload", "can_delete", "can_share_public", "can_share_internal"]:
+            string value = form(name, "inherit")
+            if value == "yes" or value == "no":
+                overrides[name] = value == "yes"
+
+        await sqlite.exec("update users set role = ?, is_active = ?, is_approved = ?, quota_override = ?, max_upload_override = ?, permission_overrides = ? where id = ?", role, is_active ? 1 : 0, is_approved ? 1 : 0, quota_bytes, max_upload, json.stringify(overrides), user["id"])
+        if not is_active:
+            await revoke_all_sessions(user["id"], "")
+        await audit_record(cf, "settings_change", p, "user", user["username"], { "role": role, "active": is_active })
+        return redirect(with_params("/admin/users", { "ok": "Usuario " + user["username"] + " actualizado." }), 303)
+
+    post endpoint("/users/:user_id/password", string user_id):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+        Json user = await get_user(user_id)
+        if not (user != null):
+            abort(404, "Ese usuario no existe.")
+
+        string password = form("password", "")
+        List<string> problems = check_password_policy(password, user["username"], user["email"], cf)
+        if len(problems) > 0:
+            return redirect(with_params("/admin/users", { "error": problems.join(" ") }), 303)
+
+        await sqlite.exec("update users set password_hash = ?, password_changed_at = ? where id = ?", await hash_password(password, cf), time.now(), user["id"])
+        await revoke_all_sessions(user["id"], "")
+        await audit_record(cf, "settings_change", p, "user", user["username"], { "action": "password_reset" })
+        return redirect(with_params("/admin/users", { "ok": "Contraseña restablecida y sesiones cerradas." }), 303)
+
+    post endpoint("/users/:user_id/recompute", string user_id):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+        Json user = await get_user(user_id)
+        if not (user != null):
+            abort(404, "Ese usuario no existe.")
+        int total = await recompute_usage(user, cf)
+        return redirect(with_params("/admin/users", { "ok": "Uso recalculado: " + format_size(total) + "." }), 303)
+
+    post endpoint("/users/:user_id/delete", string user_id):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+        Json user = await get_user(user_id)
+        if not (user != null):
+            abort(404, "Ese usuario no existe.")
+        if user["id"] == p["user"]["id"]:
+            return redirect(with_params("/admin/users", { "error": "No puedes borrar tu propia cuenta." }), 303)
+        if form("confirm", "") != user["username"]:
+            return redirect(with_params("/admin/users", { "error": "Escribe el nombre de usuario para confirmar." }), 303)
+
+        # Se borra el contenido nodo a nodo para liberar blobs y ajustar
+        # refcounts; después, lo que cuelga directamente de la cuenta.
+        await sqlite.begin()
+        for Json node in await sqlite.query("select * from nodes where owner_id = ? and parent_id is null", user["id"]):
+            await purge_node(node, cf)
+        await audit_record(cf, "settings_change", p, "user", user["username"], { "action": "delete" })
+        await sqlite.exec("delete from sessions where user_id = ?", user["id"])
+        await sqlite.exec("delete from api_tokens where user_id = ?", user["id"])
+        await sqlite.exec("delete from shares where user_id = ?", user["id"])
+        await sqlite.exec("delete from users where id = ?", user["id"])
+        await sqlite.commit()
+        return redirect(with_params("/admin/users", { "ok": "Usuario eliminado." }), 303)
+
+    # ── Ajustes ─────────────────────────────────────────────────────────────
+
+    get endpoint("/settings"):
+        Json cf = await config()
+        Json p = await need_admin(cf, "settings")
+
+        List<string> overridden = []
+        for Json r in await sqlite.query("select key from settings"):
+            overridden.add(r["key"])
+        List<Json> groups = []
+        for Json g in settings_groups():
+            List<Json> items = []
+            for Json s in g["settings"]:
+                Json item = {}.merge(s)
+                item["field"] = s["key"].replace(".", "__")
+                item["value"] = display_setting(s, cf[s["key"]])
+                item["overridden"] = overridden.contains(s["key"])
+                items.add(item)
+            groups.add({ "name": g["name"], "settings": items })
+        return render("admin_settings.html", c=ctx(cf, p, { "tab": "settings", "groups": groups, "locked": locked_keys().join(", ") }))
+
+    post endpoint("/settings"):
+        Json cf = await config()
+        Json p = await need_admin(cf, "settings")
+
+        Json fd = form_dict()
+        int changed = 0
+        List<string> errors = []
+        for Json g in settings_groups():
+            for Json s in g["settings"]:
+                string field = s["key"].replace(".", "__")
+                string raw = ""
+                if s["kind"] == "bool":
+                    raw = fd.has(field) and str(fd[field]) != "" ? "on" : ""
+                elif not fd.has(field):
+                    continue
+                else:
+                    raw = str(fd[field])
+
+                Json r = parse_setting(s, raw)
+                if not r["ok"]:
+                    errors.add(s["label"] + ": " + r["err"])
+                    continue
+                if json.stringify(r["v"]) == json.stringify(cf[s["key"]]):
+                    continue
+                await set_override(s["key"], r["v"], p["user"]["id"])
+                await audit_record(cf, "settings_change", p, "setting", s["key"], { "value": json.stringify(r["v"]) })
+                changed = changed + 1
+
+        string message = changed > 0 ? str(changed) + " ajuste(s) guardados." : "Sin cambios."
+        return redirect(with_params("/admin/settings", { "ok": message, "error": errors.join(" ") }), 303)
+
+    post endpoint("/settings/reset"):
+        Json cf = await config()
+        Json p = await need_admin(cf, "settings")
+        string key = form("key", "").trim()
+        await clear_override(key)
+        return redirect(with_params("/admin/settings", { "ok": "'" + key + "' vuelve al valor de config.json." }), 303)
+
+    # ── Auditoría ───────────────────────────────────────────────────────────
+
+    get endpoint("/audit", string event = "", string user = "", int page = 1):
+        Json cf = await config()
+        Json p = await need_admin(cf, "admin")
+
+        int per_page = 100
+        int current = page < 1 ? 1 : page
+        int offset = (current - 1) * per_page
+        string uid = ""
+        if user != "":
+            Json target = await get_user_by_name(user.trim())
+            uid = target == null ? "—" : target["id"]
+
+        List<Json> rows = []
+        if event != "" and uid != "":
+            rows = await sqlite.query("select * from audit_log where event = ? and user_id = ? order by at desc, id desc limit ? offset ?", event, uid, per_page, offset)
+        elif event != "":
+            rows = await sqlite.query("select * from audit_log where event = ? order by at desc, id desc limit ? offset ?", event, per_page, offset)
+        elif uid != "":
+            rows = await sqlite.query("select * from audit_log where user_id = ? order by at desc, id desc limit ? offset ?", uid, per_page, offset)
+        else:
+            rows = await sqlite.query("select * from audit_log order by at desc, id desc limit ? offset ?", per_page, offset)
+
+        Json names = {}
+        List<Json> view = []
+        for Json r in rows:
+            if r["user_id"] != null and not names.has(r["user_id"]):
+                Json u = await get_user(r["user_id"])
+                names[r["user_id"]] = u == null ? null : u["username"]
+            string who = "—"
+            if r["user_id"] != null and names[r["user_id"]] != null:
+                who = names[r["user_id"]]
+            elif r["actor"] != null:
+                who = r["actor"]
+            view.add(view_audit(r, who, cf))
+        return render("admin_audit.html", c=ctx(cf, p, { "tab": "audit", "rows": view, "event": event, "user": user, "page": current, "events": cf["audit.events"] }))

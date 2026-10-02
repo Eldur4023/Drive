@@ -1,0 +1,61 @@
+[Unit]
+Description=Drive — almacenamiento de ficheros autoalojado
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=drive
+Group=drive
+WorkingDirectory=/opt/drive
+# El PATH incluye los directorios del sistema además del entorno virtual: si se
+# deja sólo el venv, cualquier orden auxiliar del lanzador deja de encontrarse.
+Environment="PATH=/opt/drive/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="DRIVE_CONFIG=/opt/drive/config/config.yaml"
+
+# El secreto de firma, el puerto y el TLS se leen de aquí. Es el único sitio
+# que hay que tocar para cambiar dónde y cómo escucha el servicio.
+#
+# Ojo: server.host y server.port de config.yaml NO intervienen al arrancar por
+# systemd; manda este fichero (BIND_HOST, BIND_PORT, TLS_CERT, TLS_KEY).
+EnvironmentFile=/etc/drive/drive.env
+
+# El lanzador monta los argumentos de uvicorn según haya o no certificado y
+# según se esté detrás de un proxy; systemd no sabe hacer condicionales.
+ExecStart=/opt/drive/run.sh
+
+Restart=on-failure
+RestartSec=5
+
+# Permite escuchar en puertos por debajo de 1024 (el 443, si se expone
+# directamente sin proxy) sin necesidad de correr como root. Sobra si usas un
+# puerto alto, pero no resta seguridad: es la única capacidad concedida.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# --- Endurecimiento -------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Únicos directorios en los que el servicio puede escribir.
+ReadWritePaths=/var/lib/drive
+StateDirectory=drive
+
+# Límites: las subidas grandes abren muchos descriptores.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

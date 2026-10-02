@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Configurar 2FA · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="auth-page">
+  <div class="card">
+    <h1>Configurar el segundo factor</h1>
+    {% if already_enabled %}
+      <div class="notice ok">Ya tienes el segundo factor activo.</div>
+    {% endif %}
+    <p class="muted">
+      Escanea el código con Google Authenticator, Aegis, 1Password o similar,
+      y confirma con el código que te muestre.
+    </p>
+
+    {% if qr %}
+      <p style="text-align:center"><img src="{{ qr }}" alt="Código QR" style="max-width:220px"></p>
+    {% endif %}
+
+    <div class="field">
+      <label>O introduce la clave a mano</label>
+      <div class="token-box mono">{{ secret }}</div>
+    </div>
+
+    <form method="post" action="/2fa/setup">
+      <div class="field">
+        <label for="code">Código de verificación</label>
+        <input id="code" name="code" inputmode="numeric" maxlength="9" required
+               style="width:100%; text-align:center; letter-spacing:.2em">
+      </div>
+      <button class="primary" type="submit" style="width:100%">Activar</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

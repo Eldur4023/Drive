@@ -1,0 +1,271 @@
+# API JSON para clientes no interactivos.
+#
+# Se autentica con `Authorization: Bearer <token>` (ver el perfil de usuario) o
+# con la cookie de sesión, de modo que la misma API sirve para scripts y para
+# el propio navegador. Los errores salen como {"detail": mensaje}.
+
+# Valor de un campo que puede no venir: distingue "ausente" de "vacío".
+fn bool form_has(string name):
+    return form(name, "\0") != "\0"
+
+group("/api"):
+    require await gate_ok() else { "detail": "Acceso no permitido desde tu red." }.status(403)
+
+    get endpoint("/me"):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        if p["user"] == null:
+            return { "authenticated": false, "kind": p["kind"], "trusted_network": p["trusted_network"], "readonly": p["readonly"] }
+        Json user = p["user"]
+        Json usage = usage_of(user, cf)
+        return {
+            "authenticated": true,
+            "kind": p["kind"],
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user_label(user),
+            "email": user["email"],
+            "role": user["role"],
+            "trusted_network": p["trusted_network"],
+            "readonly": p["readonly"],
+            "scopes": p["scopes"],
+            "quota": usage["quota"],
+            "used": usage["used"],
+            "max_upload_size": max_upload_of(user, cf)
+        }
+
+    # ── Navegación ──────────────────────────────────────────────────────────
+
+    get endpoint("/files", string parent_id = "", string order = "name"):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "read")
+
+        string owner_id = p["user"]["id"]
+        if parent_id != "":
+            Json parent = await get_node(parent_id)
+            Json a = await authz(p, parent, "read", cf)
+            owner_id = parent["owner_id"]
+        List<Json> items = await children_of(owner_id, parent_id == "" ? null : parent_id, order)
+        return { "parent_id": parent_id == "" ? null : parent_id, "items": nodes_json(items) }
+
+    get endpoint("/files/:node_id", string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        require_scope(p, "read")
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+
+        Json data = node_json(node, a["access"])
+        List<Json> path = []
+        for Json n in await path_of(node):
+            path.add({ "id": n["id"], "name": n["name"] })
+        data["path"] = path
+        if node["is_dir"] == 1:
+            data["children"] = nodes_json(await children_of(node["owner_id"], node["id"], "name"))
+        return data
+
+    get endpoint("/files/:node_id/content", string node_id):
+        Json cf = await config()
+        Json p = await get_principal(cf)
+        require_scope(p, "read")
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "read", cf)
+        allow(p, "download", cf)
+        Json meta = blob_meta(node, false, cf)
+        if not (meta["ok"]):
+            abort(404, meta["error"])
+        await audit_record(cf, "download", p, "node", node["id"], { "via": "api" })
+        return send_file(meta["path"], { "filename": node["name"], "inline": false }).header("Content-Type", meta["ctype"]).header("Cache-Control", "private, max-age=86400")
+
+    get endpoint("/search", string q):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "read")
+        return { "query": q, "items": nodes_json(await search_nodes(p["user"]["id"], q)) }
+
+    get endpoint("/shared"):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "read")
+        return { "items": nodes_json(await shared_with(p["user"]["id"])) }
+
+    get endpoint("/trash"):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "read")
+        return { "items": nodes_json(await trashed_of(p["user"]["id"])) }
+
+    # ── Mutaciones ──────────────────────────────────────────────────────────
+
+    post endpoint("/files", File file, string parent_id = "", bool overwrite = false):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "write")
+        allow(p, "upload", cf)
+
+        Json parent = null
+        Json owner = p["user"]
+        if parent_id != "":
+            parent = await get_node(parent_id)
+            Json a = await authz(p, parent, "write", cf)
+            Json parent_owner = await get_user(parent["owner_id"])
+            owner = parent_owner == null ? owner : parent_owner
+
+        await sqlite.begin()
+        Json r = await save_upload(owner, parent, file.filename == "" ? "sin-nombre" : file.filename, file, overwrite, cf)
+        if not r["ok"]:
+            await sqlite.rollback()
+            return { "detail": r["error"] }.status(400)
+        await audit_record(cf, "upload", p, "node", r["node"]["id"], { "via": "api", "name": r["node"]["name"], "size": r["node"]["size"] })
+        await sqlite.commit()
+        return node_json(r["node"], null).status(201)
+
+    post endpoint("/folders"):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "write")
+        allow(p, "upload", cf)
+        if not (form("name", "").trim() != ""):
+            abort(422, "Falta el nombre de la carpeta.")
+
+        Json parent = null
+        Json owner = p["user"]
+        string parent_id = form("parent_id", "")
+        if parent_id != "":
+            parent = await get_node(parent_id)
+            Json a = await authz(p, parent, "write", cf)
+            Json parent_owner = await get_user(parent["owner_id"])
+            owner = parent_owner == null ? owner : parent_owner
+        return node_json(await create_folder(owner, parent, form("name", "")), null).status(201)
+
+    patch endpoint("/files/:node_id", string node_id):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "write")
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+
+        await sqlite.begin()
+        if form("name", "") != "":
+            Json r = await rename_node(node, form("name", ""), cf)
+            if not r["ok"]:
+                await sqlite.rollback()
+                return { "detail": r["error"] }.status(400)
+            node = await get_node(node_id)
+        if form_has("parent_id"):
+            Json target = null
+            string target_id = form("parent_id", "")
+            if target_id != "":
+                target = await get_node(target_id)
+                Json ta = await authorize(p, target, "write", cf)
+                if ta["status"] != 200:
+                    await sqlite.rollback()
+                    return { "detail": detail_for(ta["status"]) }.status(ta["status"])
+            Json m = await move_node(node, target)
+            if not m["ok"]:
+                await sqlite.rollback()
+                return { "detail": m["error"] }.status(400)
+
+        if form_has("is_public") or form_has("lan_visible"):
+            Json oa = await authorize(p, node, "owner", cf)
+            if oa["status"] != 200:
+                await sqlite.rollback()
+                return { "detail": detail_for(oa["status"]) }.status(oa["status"])
+            if form_has("is_public") and truthy(form("is_public", "")):
+                string denied = action_denied(p, "share_public", cf)
+                if denied != "":
+                    await sqlite.rollback()
+                    return { "detail": denied }.status(403)
+            if form_has("is_public"):
+                await sqlite.exec("update nodes set is_public = ? where id = ?", truthy(form("is_public", "")) ? 1 : 0, node_id)
+            if form_has("lan_visible"):
+                await sqlite.exec("update nodes set lan_visible = ? where id = ?", truthy(form("lan_visible", "")) ? 1 : 0, node_id)
+        await sqlite.commit()
+        return node_json(await get_node(node_id), null)
+
+    delete endpoint("/files/:node_id", string node_id, bool permanent = false):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "write")
+        allow(p, "delete", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, permanent ? "owner" : "write", cf)
+
+        await sqlite.begin()
+        await audit_record(cf, "delete", p, "node", node["id"], { "via": "api", "permanent": permanent })
+        if permanent:
+            await purge_node(node, cf)
+        else:
+            await trash_node(node, cf)
+        await sqlite.commit()
+        return { "deleted": node_id, "permanent": permanent }
+
+    post endpoint("/files/:node_id/restore", string node_id):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "write")
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "write", cf)
+
+        await sqlite.begin()
+        string problem = await restore_node(node, cf)
+        if problem != "":
+            await sqlite.rollback()
+            return { "detail": problem }.status(400)
+        await sqlite.commit()
+        return node_json(await get_node(node_id), null)
+
+    # ── Compartición ────────────────────────────────────────────────────────
+
+    post endpoint("/files/:node_id/shares", string node_id):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "share")
+        allow(p, "share", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "owner", cf)
+
+        Json target = await get_user_by_name(form("username", "").trim())
+        if not (target != null):
+            abort(404, "No existe ese usuario.")
+        Json r = await share_with_user(node, target, form("permission", "read"), p["user"], form_int("expires_days", 0) * 86400, null, cf)
+        if not (r["ok"]):
+            abort(400, r["error"])
+        await audit_record(cf, "share_create", p, "node", node["id"], { "kind": "user", "to": target["username"], "via": "api" })
+        return { "id": r["share"]["id"], "user": target["username"], "permission": r["share"]["permission"] }.status(201)
+
+    post endpoint("/files/:node_id/links", string node_id):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "share")
+        allow(p, "share_public", cf)
+        Json node = await get_node(node_id)
+        Json a = await authz(p, node, "owner", cf)
+
+        int days = form_int("expires_days", 0)
+        int limit = form_int("download_limit", 0)
+        Json r = await create_link(node, p["user"], form("mode", "download"), form("password", ""), days > 0 ? days * 86400 : null, limit > 0 ? limit : null, true, [], null, cf)
+        if not (r["ok"]):
+            abort(400, r["error"])
+        await audit_record(cf, "share_create", p, "node", node["id"], { "kind": "link", "via": "api" })
+        Json link = r["link"]
+        return {
+            "id": link["id"],
+            "url": link_url(link, cf),
+            "expires_at": link["expires_at"] == null ? null : time.format_iso(link["expires_at"]),
+            "mode": link["mode"]
+        }.status(201)
+
+    get endpoint("/usage"):
+        Json cf = await config()
+        Json p = await need_api(cf)
+        require_scope(p, "read")
+        Json usage = usage_of(p["user"], cf)
+        return {
+            "used": usage["used"],
+            "used_human": format_size(usage["used"]),
+            "quota": usage["quota"],
+            "quota_human": format_size(usage["quota"]),
+            "percent": usage["percent"]
+        }

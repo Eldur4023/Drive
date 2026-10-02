@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="{{ config.app.language }}" data-theme="{{ theme }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+{% set authed = principal and principal.is_authenticated %}
+{% set path = request.url.path if request else '' %}
+<body class="{{ 'shell' if authed else 'bare' }}">
+
+{# Sprite de iconos: se usan con <svg class="ico"><use href="#i-nombre"/></svg>. #}
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6M9 14h6"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-text" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
+    <symbol id="i-pdf" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 17v-5h1.5a1.5 1.5 0 0 1 0 3H9"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="M21 16l-5-5-9 9"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l6 3-6 3z"/></symbol>
+    <symbol id="i-audio" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M4 8h16v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M3 4h18v4H3zM10 12h4"/></symbol>
+    <symbol id="i-sheet" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M10 3v18"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14.5a6.5 6.5 0 0 1 3.5 5.5"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 4H5a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h4M16 8l4 4-4 4M20 12H9"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></symbol>
+    <symbol id="i-wifi" viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.9 9.6 4.2 4.2 0 0 1 17.5 18z"/></symbol>
+  </defs>
+</svg>
+
+{% macro nav(href, icon, label, match) %}
+  <a href="{{ href }}" class="nav-item {% if path == href or (match and path.startswith(match)) %}active{% endif %}">
+    <svg class="ico"><use href="#i-{{ icon }}"/></svg><span>{{ label }}</span>
+  </a>
+{% endmacro %}
+
+{% if authed %}
+<aside class="sidebar">
+  <a class="brand" href="/">
+    <span class="logo"><svg class="ico"><use href="#i-cloud"/></svg></span>
+    <span class="brand-name">{{ app_name }}</span>
+  </a>
+  <nav>
+    {{ nav('/files', 'folder', 'Mis ficheros', '/files') }}
+    {{ nav('/shared', 'users', 'Compartidos') }}
+    {{ nav('/links', 'link', 'Enlaces', '/links') }}
+    {{ nav('/trash', 'trash', 'Papelera') }}
+    {% if can.admin or can.settings %}{{ nav('/admin', 'shield', 'Administración', '/admin') }}{% endif %}
+  </nav>
+</aside>
+{% endif %}
+
+<div class="stage">
+  <header class="topbar">
+    {% if not authed %}
+      <a class="brand" href="/">
+        <span class="logo"><svg class="ico"><use href="#i-cloud"/></svg></span>
+        <span class="brand-name">{{ app_name }}</span>
+      </a>
+    {% endif %}
+
+    {% if authed %}
+      <form class="search" action="/search" method="get" role="search">
+        <svg class="ico"><use href="#i-search"/></svg>
+        <input type="search" name="q" placeholder="Buscar en {{ app_name }}…" value="{{ q|default('') }}" aria-label="Buscar">
+      </form>
+    {% else %}
+      <nav class="top-links"><a href="/browse" class="{{ 'active' if path.startswith('/browse') }}">Contenido público</a></nav>
+    {% endif %}
+
+    <div class="account">
+      {% if authed and principal.kind == 'network' %}<span class="tag lan" title="Sesión abierta por estar en una red de confianza"><svg class="ico"><use href="#i-wifi"/></svg>red local</span>
+      {% elif not authed and principal and principal.trusted_network %}<span class="tag lan"><svg class="ico"><use href="#i-wifi"/></svg>red local</span>{% endif %}
+      {% if authed and principal.readonly %}<span class="tag warn"><svg class="ico"><use href="#i-lock"/></svg>sólo lectura</span>{% endif %}
+
+      <button type="button" class="icon-btn" data-theme-toggle title="Cambiar tema" aria-label="Cambiar tema">
+        <svg class="ico t-sun"><use href="#i-sun"/></svg><svg class="ico t-moon"><use href="#i-moon"/></svg>
+      </button>
+
+      {% if authed %}
+        <details class="menu">
+          <summary aria-label="Cuenta">
+            <span class="avatar">{{ (principal.user.label or '?')[:1]|upper }}</span>
+            <span class="who">{{ principal.user.label }}</span>
+            <svg class="ico chev"><use href="#i-chev"/></svg>
+          </summary>
+          <div class="menu-panel">
+            <a href="/profile"><svg class="ico"><use href="#i-user"/></svg>Mi perfil</a>
+            <form method="post" action="/logout"><button type="submit"><svg class="ico"><use href="#i-logout"/></svg>Cerrar sesión</button></form>
+          </div>
+        </details>
+      {% else %}
+        <a class="button primary" href="/login">Iniciar sesión</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <main>
+    {% if ok %}<div class="notice ok" role="status"><svg class="ico"><use href="#i-check"/></svg><span>{{ ok }}</span></div>{% endif %}
+    {% if error %}<div class="notice error" role="alert"><svg class="ico"><use href="#i-info"/></svg><span>{{ error }}</span></div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer>
+    <span>{{ app_name }}</span>
+    {% if config.ui.footer_text %}<span>{{ config.ui.footer_text }}</span>{% endif %}
+  </footer>
+</div>
+
+{# Diálogo de confirmación y toasts: los rellena app.js. Sin JS se usa el flujo normal. #}
+<dialog id="confirm" class="modal">
+  <form method="dialog">
+    <div class="modal-icon"><svg class="ico"><use href="#i-info"/></svg></div>
+    <h3 id="confirm-title">¿Seguro?</h3>
+    <p id="confirm-text" class="muted"></p>
+    <div class="modal-actions">
+      <button value="cancel" class="button">Cancelar</button>
+      <button value="ok" class="button danger-solid" id="confirm-ok">Confirmar</button>
+    </div>
+  </form>
+</dialog>
+<div id="toasts" aria-live="polite"></div>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

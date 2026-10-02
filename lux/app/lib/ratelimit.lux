@@ -1,0 +1,29 @@
+# Limitador de peticiones en memoria, por IP y familia de endpoint.
+#
+# Ventana deslizante sobre state.hit: cuenta los golpes de los últimos `window`
+# segundos, y state.ttl da cuánto falta para poder reintentar. Vive en memoria: se pierde al reiniciar y no se comparte
+# entre máquinas.
+
+# Registra un intento. Devuelve {"ok": bool, "retry": segundos hasta reintentar}.
+fn Json rate_check(Json cf, string bucket, string identity, string ip):
+    if not cf["rate_limit.enabled"]:
+        return { "ok": true, "retry": 0 }
+    if ip != "" and ip_in_nets(ip, cf["rate_limit.exempt_networks"]):
+        return { "ok": true, "retry": 0 }
+
+    string base = "rate_limit." + bucket
+    if not cf.has(base + ".requests"):
+        return { "ok": true, "retry": 0 }
+    int window = cf[base + ".window"] == null ? 60 : cf[base + ".window"]
+    string key = "rl:" + bucket + ":" + identity
+    int hits = state.hit(key, window * 1000)
+    if hits > cf[base + ".requests"]:
+        # Lo que falta para que salga de la ventana el golpe más antiguo.
+        Json left = state.ttl(key)
+        return { "ok": false, "retry": left == null or left < 0 ? window : int((left + 999) / 1000) }
+    return { "ok": true, "retry": 0 }
+
+# Limpia el contador, por ejemplo tras un login correcto.
+fn bool rate_reset(string bucket, string identity):
+    state.remove("rl:" + bucket + ":" + identity)
+    return true

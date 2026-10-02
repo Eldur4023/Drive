@@ -1,0 +1,165 @@
+# Perfil del usuario: datos, preferencias, sesiones y tokens de API.
+
+fn List<string> valid_scopes():
+    return ["read", "write", "share"]
+
+group(""):
+    require await gate_ok() else text("Acceso no permitido desde tu red.").status(403)
+
+    get endpoint("/profile", string new_token = ""):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json user = p["user"]
+        string tz = cf["app.timezone"]
+        Json prefs = parse_json_text(user["preferences"], {})
+
+        List<Json> sessions = []
+        for Json s in await sqlite.query("select * from sessions where user_id = ? and revoked = 0 and expires_at > ? order by last_seen_at desc", user["id"], time.now()):
+            Json row = {}.merge(s)
+            row["ip_h"] = s["ip"] == null ? "—" : s["ip"]
+            row["agent_h"] = s["user_agent"] == null ? "—" : str(s["user_agent"]).slice(0, 70)
+            row["last_seen_rel"] = fmt_rel(s["last_seen_at"], tz)
+            row["current"] = s["id"] == p["session_id"]
+            sessions.add(row)
+
+        List<Json> tokens = []
+        for Json t in await sqlite.query("select * from api_tokens where user_id = ? and revoked = 0 order by created_at desc", user["id"]):
+            Json row = {}.merge(t)
+            List<string> names = []
+            for Json s in parse_json_text(t["scopes"], []):
+                names.add(str(s))
+            row["scopes_h"] = names.join(", ")
+            row["last_used_rel"] = fmt_rel(t["last_used_at"], tz)
+            row["expires_h"] = t["expires_at"] == null ? "sin caducidad" : fmt_date(t["expires_at"], tz)
+            tokens.add(row)
+
+        Json role = role_profile(cf, user["role"])
+        return render("profile.html", c=ctx(cf, p, {
+            "me": {
+                "username": user["username"],
+                "display_name": user["display_name"] == null ? "" : user["display_name"],
+                "email": user["email"] == null ? "" : user["email"],
+                "bio": user["bio"] == null ? "" : user["bio"],
+                "role": user["role"],
+                "totp_enabled": user["totp_enabled"],
+                "created_h": fmt_date(user["created_at"], tz),
+                "last_login_h": fmt_date(user["last_login_at"], tz)
+            },
+            "usage": usage_view(usage_of(user, cf)),
+            "max_upload_h": format_size(max_upload_of(user, cf)),
+            "prefs": {
+                "theme": prefs.has("theme") ? prefs["theme"] : cf["ui.theme"],
+                "order": prefs.has("order") ? prefs["order"] : "name",
+                "view": prefs.has("view") ? prefs["view"] : "list",
+                "items_per_page": prefs.has("items_per_page") ? prefs["items_per_page"] : cf["ui.items_per_page"]
+            },
+            "sessions": sessions,
+            "tokens": tokens,
+            "new_token": new_token,
+            "scopes": valid_scopes()
+        }))
+
+    post endpoint("/profile"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json user = p["user"]
+        string email = form("email", "").trim().lower()
+
+        if email != "" and email != (user["email"] == null ? "" : user["email"]):
+            if len(await sqlite.query("select id from users where email = ? and id != ?", email, user["id"])) > 0:
+                return redirect(with_params("/profile", { "error": "Ese correo ya está en uso." }), 303)
+
+        string display = form("display_name", "").trim()
+        string bio = form("bio", "").trim()
+        await sqlite.exec("update users set display_name = ?, email = ?, bio = ? where id = ?", display == "" ? null : display, email == "" ? null : email, bio == "" ? null : bio, user["id"])
+        return redirect(with_params("/profile", { "ok": "Perfil actualizado." }), 303)
+
+    post endpoint("/profile/preferences"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json user = p["user"]
+        Json prefs = parse_json_text(user["preferences"], {})
+
+        string theme = form("theme", "auto")
+        string order = form("order", "name")
+        string view = form("view", "list")
+        int per_page = form_int("items_per_page", 100)
+        prefs["theme"] = in_list(theme, ["auto", "light", "dark"]) ? theme : "auto"
+        prefs["order"] = in_list(order, ["name", "size", "modified", "created"]) ? order : "name"
+        prefs["view"] = in_list(view, ["list", "grid"]) ? view : "list"
+        prefs["items_per_page"] = math.max(10, math.min(500, per_page))
+        await sqlite.exec("update users set preferences = ? where id = ?", json.stringify(prefs), user["id"])
+        return redirect(with_params("/profile", { "ok": "Preferencias guardadas." }), 303)
+
+    post endpoint("/profile/password"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json user = p["user"]
+        string password = form("password", "")
+
+        if not await verify_password(form("current", ""), user["password_hash"]):
+            return redirect(with_params("/profile", { "error": "La contraseña actual no es correcta." }), 303)
+        if password != form("password2", ""):
+            return redirect(with_params("/profile", { "error": "Las contraseñas nuevas no coinciden." }), 303)
+        List<string> problems = check_password_policy(password, user["username"], user["email"], cf)
+        if len(problems) > 0:
+            return redirect(with_params("/profile", { "error": problems.join(" ") }), 303)
+
+        long now = time.now()
+        await sqlite.exec("update users set password_hash = ?, password_changed_at = ? where id = ?", await hash_password(password, cf), now, user["id"])
+        if cf["security.session.revoke_on_password_change"]:
+            await revoke_all_sessions(user["id"], p["session_id"] == null ? "" : p["session_id"])
+            return redirect(with_params("/profile", { "ok": "Contraseña cambiada. Se han cerrado las demás sesiones." }), 303)
+        return redirect(with_params("/profile", { "ok": "Contraseña cambiada." }), 303)
+
+    # ── Sesiones ────────────────────────────────────────────────────────────
+
+    post endpoint("/profile/sessions/:session_id/revoke", string session_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json s = first(await sqlite.query("select * from sessions where id = ?", session_id))
+        if not (s != null and s["user_id"] == p["user"]["id"]):
+            abort(404, "Esa sesión no existe.")
+        await revoke_session(s["id"])
+        return redirect(with_params("/profile", { "ok": "Sesión cerrada." }), 303)
+
+    post endpoint("/profile/sessions/revoke-all"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        int count = await revoke_all_sessions(p["user"]["id"], p["session_id"] == null ? "" : p["session_id"])
+        return redirect(with_params("/profile", { "ok": str(count) + " sesión(es) cerradas." }), 303)
+
+    # ── Tokens de API ───────────────────────────────────────────────────────
+
+    post endpoint("/profile/tokens"):
+        Json cf = await config()
+        Json p = await need_login(cf)
+
+        List<string> chosen = []
+        for string s in form_list("scopes"):
+            if in_list(s, valid_scopes()):
+                chosen.add(s)
+        if len(chosen) == 0:
+            chosen.add("read")
+
+        string name = form("name", "").trim().slice(0, 128)
+        int days = form_int("expires_days", 0)
+        string raw = generate_token(40)
+        string id = new_id()
+        await sqlite.exec(
+            "insert into api_tokens (id, user_id, name, token_hash, scopes, created_at, expires_at, revoked) values (?, ?, ?, ?, ?, ?, ?, 0)",
+            id, p["user"]["id"], name == "" ? "token" : name, hash_token(raw), json.stringify(chosen), time.now(),
+            days > 0 ? time.now() + days * 86400000 : null)
+        await audit_record(cf, "settings_change", p, "api_token", id, { "action": "create" })
+
+        # El token en claro se muestra una única vez.
+        return redirect(with_params("/profile", { "new_token": raw }), 303)
+
+    post endpoint("/profile/tokens/:token_id/revoke", string token_id):
+        Json cf = await config()
+        Json p = await need_login(cf)
+        Json t = first(await sqlite.query("select * from api_tokens where id = ?", token_id))
+        if not (t != null and t["user_id"] == p["user"]["id"]):
+            abort(404, "Ese token no existe.")
+        await sqlite.exec("update api_tokens set revoked = 1 where id = ?", t["id"])
+        return redirect(with_params("/profile", { "ok": "Token revocado." }), 303)

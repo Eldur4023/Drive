@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Usuarios · {{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="row" style="margin-bottom:16px">
+  <a class="button" href="/admin">Resumen</a>
+  <a class="button primary" href="/admin/users">Usuarios</a>
+  <a class="button" href="/admin/settings">Ajustes</a>
+  <a class="button" href="/admin/audit">Auditoría</a>
+</div>
+
+<div class="card">
+  <h2>Crear usuario</h2>
+  <form method="post" action="/admin/users" class="row">
+    <input name="username" placeholder="usuario" required>
+    <input name="email" type="email" placeholder="correo (opcional)">
+    <input name="password" type="password" placeholder="contraseña" required autocomplete="new-password">
+    <select name="role">
+      {% for role in roles %}<option value="{{ role }}">{{ role }}</option>{% endfor %}
+    </select>
+    <input name="quota" placeholder="cuota (p. ej. 20GB)" style="width:150px">
+    <button class="primary" type="submit">Crear</button>
+  </form>
+</div>
+
+{% for user in users %}
+<div class="card">
+  <div class="spread">
+    <h2 style="margin:0">
+      {{ user.label }} <span class="muted mono">{{ user.username }}</span>
+      {% if not user.is_approved %}<span class="tag warn">pendiente</span>{% endif %}
+      {% if not user.is_active %}<span class="tag warn">desactivado</span>{% endif %}
+      {% if user.totp_enabled %}<span class="tag">2FA</span>{% endif %}
+    </h2>
+    <span class="muted">
+      {{ usages[user.id].used|size }}{% if not usages[user.id].unlimited %} / {{ usages[user.id].quota|size }}{% endif %}
+    </span>
+  </div>
+
+  <form method="post" action="/admin/users/{{ user.id }}">
+    <div class="grid cols-3">
+      <div class="field">
+        <label>Rol</label>
+        <select name="role">
+          {% for role in roles %}
+            <option value="{{ role }}" {% if user.role.value == role %}selected{% endif %}>{{ role }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Cuota (vacío = la del rol)</label>
+        <input name="quota" value="{{ user.quota_override|size if user.quota_override else '' }}" placeholder="p. ej. 50GB">
+      </div>
+      <div class="field">
+        <label>Máximo por fichero (vacío = el del rol)</label>
+        <input name="max_upload" value="{{ user.max_upload_override|size if user.max_upload_override else '' }}">
+      </div>
+      {% set overrides = user.permission_overrides or {} %}
+      {% for name, label in [('can_upload','Subir'), ('can_delete','Borrar'), ('can_share_internal','Compartir'), ('can_share_public','Enlaces públicos')] %}
+        <div class="field">
+          <label>{{ label }}</label>
+          <select name="{{ name }}">
+            <option value="inherit" {% if name not in overrides %}selected{% endif %}>Según el rol</option>
+            <option value="yes" {% if overrides.get(name) is sameas true %}selected{% endif %}>Permitir</option>
+            <option value="no" {% if overrides.get(name) is sameas false %}selected{% endif %}>Denegar</option>
+          </select>
+        </div>
+      {% endfor %}
+    </div>
+    <div class="row">
+      <label class="row" style="margin:0">
+        <input type="checkbox" name="is_active" value="true" {% if user.is_active %}checked{% endif %}> Activo
+      </label>
+      <label class="row" style="margin:0">
+        <input type="checkbox" name="is_approved" value="true" {% if user.is_approved %}checked{% endif %}> Aprobado
+      </label>
+      <button class="primary" type="submit">Guardar</button>
+    </div>
+  </form>
+
+  <h3>Acciones</h3>
+  <div class="row">
+    <form class="row" method="post" action="/admin/users/{{ user.id }}/password">
+      <input name="password" type="password" placeholder="nueva contraseña" required autocomplete="new-password">
+      <button type="submit">Restablecer contraseña</button>
+    </form>
+    <form class="inline" method="post" action="/admin/users/{{ user.id }}/recompute">
+      <button type="submit">Recalcular uso</button>
+    </form>
+    <form class="row" method="post" action="/admin/users/{{ user.id }}/delete"
+          data-confirm="Se borrará la cuenta y TODO su contenido. ¿Continuar?">
+      <input name="confirm" placeholder="escribe «{{ user.username }}»">
+      <button class="danger" type="submit">Eliminar cuenta</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}
