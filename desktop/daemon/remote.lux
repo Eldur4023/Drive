@@ -89,3 +89,23 @@ fn Json remote_trash(string id):
         return outcome(r, 200)
     catch e:
         return failed("no se pudo borrar: " + e.message)
+
+# Enlace público de descarga (body = {id, url, expires_at, mode}).
+fn Json remote_link(string id):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json r = await http.post(base + "/api/files/" + id + "/links", { "mode": "download" }, headers, { "form": true, "timeout_ms": 30000 })
+        return outcome(r, 201)
+    catch e:
+        return failed("no se pudo crear el enlace: " + e.message)
+
+# Comparte con otro usuario de Drive; permission = read | write.
+fn Json remote_share(string id, string username, string permission):
+    try:
+        string base = await server_url()
+        Json headers = await auth_headers()
+        Json r = await http.post(base + "/api/files/" + id + "/shares", { "username": username, "permission": permission }, headers, { "form": true, "timeout_ms": 30000 })
+        return outcome(r, 201)
+    catch e:
+        return failed("no se pudo compartir: " + e.message)

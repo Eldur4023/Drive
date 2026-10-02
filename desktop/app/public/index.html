@@ -22,6 +22,8 @@
   <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
   <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"/></symbol>
   <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></symbol>
+  <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
 </defs></svg>
 
@@ -42,7 +44,7 @@
 
   <section id="onboarding" class="card" hidden>
     <h1>Conecta con tu Drive</h1>
-    <p class="muted">En la web de Drive, abre <b>Perfil → Tokens de API</b>, crea uno con los ámbitos <b>read</b> y <b>write</b> y pégalo aquí.</p>
+    <p class="muted">En la web de Drive, abre <b>Perfil → Tokens de API</b>, crea uno con los ámbitos <b>read</b>, <b>write</b> y <b>share</b> y pégalo aquí.</p>
     <form id="form-settings">
       <div class="field"><label for="server_url">Dirección de Drive</label>
         <input id="server_url" placeholder="http://192.168.1.20:7777" autocomplete="off" required></div>
@@ -123,6 +125,22 @@
     <button id="update-later" type="button">Más tarde</button>
     <button id="update-go" type="button" class="primary">Actualizar</button>
   </div>
+</dialog>
+
+<!-- Menú del clic derecho en el explorador -->
+<div id="ctx" class="ctx" role="menu" hidden></div>
+
+<!-- Compartir con otro usuario de Drive -->
+<dialog id="dlg-share" class="modal">
+  <h3 id="share-title">Compartir</h3>
+  <form id="form-share" method="dialog">
+    <div class="field"><label for="share-user">Usuario de Drive</label>
+      <input id="share-user" maxlength="100" autocomplete="off" required></div>
+    <div class="field"><label for="share-perm">Permiso</label>
+      <select id="share-perm"><option value="read">Puede ver y descargar</option><option value="write">Puede editar</option></select></div>
+    <p id="share-error" class="error" hidden></p>
+    <div class="actions-end"><button id="share-no" type="button">Cancelar</button><button type="submit" class="primary">Compartir</button></div>
+  </form>
 </dialog>
 
 <!-- Confirmación y petición de texto genéricas -->

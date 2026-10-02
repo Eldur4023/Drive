@@ -104,9 +104,9 @@
           <th class="right"></th>
         </tr>
       </thead>
-      <tbody>
+      <tbody data-ctx{% if can.share %} data-can-share{% endif %}{% if can.share_public %} data-can-link{% endif %}>
       {% for item in items %}
-        <tr>
+        <tr data-id="{{ item.id }}" data-name="{{ item.name }}"{% if item.is_dir %} data-dir{% endif %}>
           <td>
             <div class="name-cell">
               {% if config.thumbnails.enabled and not item.is_dir and item.mime_type and item.mime_type.startswith('image/') %}
@@ -141,4 +141,21 @@
   </div>
   {% endif %}
 </div>
+
+{# Menú del clic derecho y diálogo de compartir: los maneja app.js. #}
+<div id="ctx" class="ctx" role="menu" hidden></div>
+<dialog id="share-dlg" class="modal prompt">
+  <form method="dialog">
+    <div class="modal-icon"><svg class="ico"><use href="#i-users"/></svg></div>
+    <h3 id="share-title">Compartir</h3>
+    <div class="field"><label for="share-user">Usuario de Drive</label>
+      <input id="share-user" maxlength="100" autocomplete="off"></div>
+    <div class="field"><label for="share-perm">Permiso</label>
+      <select id="share-perm"><option value="read">Puede ver y descargar</option><option value="write">Puede editar</option></select></div>
+    <div class="modal-actions">
+      <button value="cancel" class="button">Cancelar</button>
+      <button value="ok" class="button primary">Compartir</button>
+    </div>
+  </form>
+</dialog>
 {% endblock %}

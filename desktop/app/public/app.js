@@ -144,18 +144,86 @@
     });
   }
   $("f-crumbs").onclick = function (e) { var b = e.target.closest("button"); if (b) { files.stack = files.stack.slice(0, +b.dataset.i + 1); msg(""); loadFiles(); } };
+  function download(tr) {
+    msg("Descargando «" + tr.dataset.name + "»…");
+    api("POST", "/api/remote/download", { id: tr.dataset.id, name: tr.dataset.name }).then(function (r) {
+      if (r.body.cancelled) { msg(""); return; }
+      msg(r.ok ? "Descargado en " + r.body.path : (r.body.error || "No se pudo descargar."), !r.ok);
+    });
+  }
+  function openDir(tr) { files.stack.push({ id: tr.dataset.id, name: tr.dataset.name }); msg(""); loadFiles(); }
   $("f-rows").onclick = function (e) {
     var tr = e.target.closest("tr[data-id]"); if (!tr) { return; }
-    if (e.target.closest("button[data-act=download]")) {
-      msg("Descargando «" + tr.dataset.name + "»…");
-      api("POST", "/api/remote/download", { id: tr.dataset.id, name: tr.dataset.name }).then(function (r) {
-        if (r.body.cancelled) { msg(""); return; }
-        msg(r.ok ? "Descargado en " + r.body.path : (r.body.error || "No se pudo descargar."), !r.ok);
-      });
-      return;
-    }
-    if (tr.classList.contains("dir")) { files.stack.push({ id: tr.dataset.id, name: tr.dataset.name }); msg(""); loadFiles(); }
+    if (e.target.closest("button[data-act=download]")) { download(tr); return; }
+    if (tr.classList.contains("dir")) { openDir(tr); }
   };
+
+  // ------------------------------------------------ menú del clic derecho
+  // La app se queda el clic derecho: sobre un fichero o carpeta abre este menú
+  // y en el resto no hace nada (nada de «Recargar» ni «Atrás» de WebKit). En
+  // los campos de texto se deja el nativo para poder pegar el token.
+  var ctx = $("ctx"), ctxRow = null;
+  function closeCtx() {
+    ctx.hidden = true;
+    if (ctxRow) { ctxRow.classList.remove("sel"); ctxRow = null; }
+  }
+  // Un token sin el ámbito «share» es el fallo esperable: se explica qué hacer.
+  function shareError(r, fallback) {
+    var e = r.body.error || fallback;
+    return /ámbito 'share'/.test(e) ? "Tu token no puede compartir: crea uno con el ámbito share en la web (Perfil → Tokens de API) y pégalo en Ajustes." : e;
+  }
+  var ctxActions = {
+    open: openDir,
+    download: download,
+    web: function (tr) { api("POST", "/api/open-web", { id: tr.dataset.id }); },
+    link: function (tr) {
+      msg("Creando enlace…");
+      api("POST", "/api/remote/link", { id: tr.dataset.id }).then(function (r) {
+        msg(r.ok ? "Enlace copiado al portapapeles: " + r.body.url : shareError(r, "No se pudo crear el enlace."), !r.ok);
+      });
+    },
+    share: function (tr) {
+      var d = $("dlg-share");
+      $("share-title").textContent = "Compartir «" + tr.dataset.name + "»";
+      $("share-user").value = ""; $("share-error").hidden = true;
+      $("form-share").onsubmit = function (e) {
+        e.preventDefault();
+        var user = $("share-user").value.trim();
+        api("POST", "/api/remote/share", { id: tr.dataset.id, username: user, permission: $("share-perm").value }).then(function (r) {
+          if (!r.ok) { $("share-error").hidden = false; $("share-error").textContent = shareError(r, "No se pudo compartir."); return; }
+          d.close(); msg("«" + tr.dataset.name + "» compartido con " + user + ".");
+        });
+      };
+      $("share-no").onclick = function () { d.close(); };
+      d.showModal(); $("share-user").focus();
+    }
+  };
+  document.addEventListener("contextmenu", function (e) {
+    if (e.target.closest("input, textarea")) { return; }
+    e.preventDefault();
+    closeCtx();
+    var tr = e.target.closest("#f-rows tr[data-id]"); if (!tr) { return; }
+    var items = [tr.classList.contains("dir") ? ["open", "folder", "Abrir"] : ["download", "download", "Descargar"], null,
+      ["link", "link", "Crear enlace para compartir"], ["share", "user", "Compartir con un usuario…"], null,
+      ["web", "open", "Abrir en la web"]];
+    ctx.innerHTML = items.map(function (it) {
+      return it ? '<button type="button" role="menuitem" data-act="' + it[0] + '">' + icon(it[1]) + esc(it[2]) + "</button>" : "<hr>";
+    }).join("");
+    ctxRow = tr; tr.classList.add("sel");
+    ctx.hidden = false;
+    ctx.style.left = Math.min(e.clientX, window.innerWidth - ctx.offsetWidth - 8) + "px";
+    ctx.style.top = Math.min(e.clientY, window.innerHeight - ctx.offsetHeight - 8) + "px";
+    ctx.querySelector("button").focus();
+  });
+  ctx.onclick = function (e) {
+    var b = e.target.closest("button[data-act]"), tr = ctxRow; if (!b) { return; }
+    closeCtx(); ctxActions[b.dataset.act](tr);
+  };
+  document.addEventListener("click", function (e) { if (!ctx.contains(e.target)) { closeCtx(); } });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") { closeCtx(); } });
+  window.addEventListener("scroll", closeCtx, true);
+  window.addEventListener("resize", closeCtx);
+  window.addEventListener("blur", closeCtx);
   $("f-upload").onclick = function () {
     var cur = files.stack[files.stack.length - 1];
     msg("Elige el fichero…");
@@ -293,7 +361,7 @@
   $("update-later").onclick = function () { $("dlg-update").close(); };
   $("update-go").onclick = function () {
     var go = $("update-go"), log = $("update-log");
-    if (go.dataset.done) { api("POST", "/api/restart"); return; }
+    if (go.dataset.done) { go.disabled = true; api("POST", "/api/restart"); return; }  // un doble clic abría dos ventanas
     go.disabled = true; $("update-later").disabled = true; log.hidden = false; log.textContent = "Empezando…";
     api("POST", "/api/update").then(function (r) {
       if (!r.ok) { log.textContent = r.body.error || "No se pudo empezar."; go.disabled = false; $("update-later").disabled = false; return; }

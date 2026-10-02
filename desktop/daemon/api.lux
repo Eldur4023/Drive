@@ -169,3 +169,24 @@ post endpoint("/api/remote/upload", Json body):
     if not r["ok"]:
         return { "ok": false, "error": r["error"] }.status(502)
     return { "ok": true }
+
+# Compartir desde el menú contextual del explorador.
+post endpoint("/api/remote/link", Json body):
+    await need_token()
+    Json r = await remote_link(str(body["id"]))
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    return { "ok": true, "url": r["body"]["url"] }
+
+post endpoint("/api/remote/share", Json body):
+    await need_token()
+    string user = str(body["username"]).trim()
+    string perm = str(body["permission"])
+    if user == "":
+        return { "ok": false, "error": "falta el usuario" }.status(400)
+    if perm != "read" and perm != "write":
+        return { "ok": false, "error": "permiso no válido" }.status(400)
+    Json r = await remote_share(str(body["id"]), user, perm)
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    return { "ok": true }

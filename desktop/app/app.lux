@@ -93,6 +93,17 @@ post endpoint("/api/remote/download", Json body):
     Json r = await daemon("POST", "/api/remote/download", { "id": body["id"], "dest": dest })
     return r["body"].status(r["status"])
 
+# Enlace para compartir: lo crea el servicio y aquí se copia al portapapeles.
+post endpoint("/api/remote/link", Json body):
+    Json r = await daemon("POST", "/api/remote/link", { "id": body["id"] })
+    if r["status"] == 200:
+        window.clipboard_write(str(r["body"]["url"]))
+    return r["body"].status(r["status"])
+
+post endpoint("/api/remote/share", Json body):
+    Json r = await daemon("POST", "/api/remote/share", body)
+    return r["body"].status(r["status"])
+
 # Subir: el diálogo nativo de abrir elige el fichero; el servicio lo sube.
 post endpoint("/api/remote/upload", Json body):
     string path = await window.open_file()

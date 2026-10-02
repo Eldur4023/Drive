@@ -33,11 +33,11 @@
 
   // ------------------------------------------------------------ avisos
   var toasts = $("#toasts");
-  function toast(text, ms) {
+  function toast(text, ms, bad) {
     if (!toasts) { return; }
     var el = document.createElement("div");
-    el.className = "toast";
-    el.innerHTML = icon("check") + "<span>" + esc(text) + "</span>";
+    el.className = bad ? "toast bad" : "toast";
+    el.innerHTML = icon(bad ? "x" : "check") + "<span>" + esc(text) + "</span>";
     toasts.appendChild(el);
     setTimeout(function () {
       el.classList.add("out");
@@ -365,4 +365,88 @@
       input.focus();
     });
   });
+
+  // ------------------------------------------------ menú del clic derecho
+  // La página se queda el clic derecho: sobre un fichero o carpeta abre este
+  // menú y en el resto no hace nada. En los campos de texto se deja el del
+  // navegador para poder pegar.
+  var ctx = $("#ctx"), ctxRow = null;
+  // Colgado de <body>: <main> se anima con transform y eso desplazaría el position: fixed.
+  if (ctx) { document.body.appendChild(ctx); }
+  function closeCtx() {
+    if (ctx) { ctx.hidden = true; }
+    if (ctxRow) { ctxRow.classList.remove("sel"); ctxRow = null; }
+  }
+  // La API responde {detail} en los errores.
+  function post(url, fields) {
+    return fetch(url, { method: "POST", body: new URLSearchParams(fields), headers: { Accept: "application/json" } })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (!r.ok) { throw new Error(j.detail || "Error " + r.status); }
+          return j;
+        });
+      });
+  }
+  function copyLink(url) {
+    var shown = function () { window.prompt("Enlace para compartir:", url); };
+    if (!navigator.clipboard) { shown(); return; }  // sólo existe con https o localhost
+    navigator.clipboard.writeText(url).then(function () { toast("Enlace copiado al portapapeles", 3200); }, shown);
+  }
+  var ctxActions = {
+    open: function (row) { location.href = "/files/" + row.dataset.id; },
+    download: function (row) { location.href = "/files/" + row.dataset.id + "/download"; },
+    detail: function (row) { location.href = "/files/" + row.dataset.id + "/detail"; },
+    link: function (row) {
+      post("/api/files/" + row.dataset.id + "/links", { mode: "download" })
+        .then(function (j) { copyLink(j.url); }, function (e) { toast(e.message, 4000, true); });
+    },
+    share: function (row) {
+      var box = $("#share-dlg"), user = $("#share-user");
+      $("#share-title").textContent = "Compartir «" + row.dataset.name + "»";
+      user.value = "";
+      box.addEventListener("close", function onClose() {
+        box.removeEventListener("close", onClose);
+        if (box.returnValue !== "ok" || !user.value.trim()) { return; }
+        post("/api/files/" + row.dataset.id + "/shares", { username: user.value.trim(), permission: $("#share-perm").value })
+          .then(function (j) { toast("Compartido con " + j.user, 3200); }, function (e) { toast(e.message, 4000, true); });
+      });
+      box.showModal();
+      user.focus();
+    },
+  };
+  document.addEventListener("contextmenu", function (e) {
+    if (e.target.closest("input, textarea, [contenteditable]")) { return; }
+    e.preventDefault();
+    closeCtx();
+    var row = e.target.closest("[data-ctx] tr[data-id]");
+    if (!row || !ctx) { return; }
+    var body = row.parentNode, dir = row.hasAttribute("data-dir");
+    var items = [dir ? ["open", "folder", "Abrir"] : ["download", "download", "Descargar"]];
+    if (body.hasAttribute("data-can-link") || body.hasAttribute("data-can-share")) { items.push(null); }
+    if (body.hasAttribute("data-can-link")) { items.push(["link", "link", "Crear enlace para compartir"]); }
+    if (body.hasAttribute("data-can-share")) { items.push(["share", "users", "Compartir con un usuario…"]); }
+    items.push(null, ["detail", "info", "Detalles"]);
+    ctx.innerHTML = items.map(function (it) {
+      return it ? '<button type="button" role="menuitem" data-act="' + it[0] + '">' + icon(it[1]) + esc(it[2]) + "</button>" : "<hr>";
+    }).join("");
+    ctxRow = row;
+    row.classList.add("sel");
+    ctx.hidden = false;
+    ctx.style.left = Math.min(e.clientX, window.innerWidth - ctx.offsetWidth - 8) + "px";
+    ctx.style.top = Math.min(e.clientY, window.innerHeight - ctx.offsetHeight - 8) + "px";
+    ctx.querySelector("button").focus();
+  });
+  if (ctx) {
+    ctx.addEventListener("click", function (e) {
+      var b = e.target.closest("button[data-act]"), row = ctxRow;
+      if (!b) { return; }
+      closeCtx();
+      ctxActions[b.dataset.act](row);
+    });
+    document.addEventListener("click", function (e) { if (!ctx.contains(e.target)) { closeCtx(); } });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") { closeCtx(); } });
+    window.addEventListener("scroll", closeCtx, true);
+    window.addEventListener("resize", closeCtx);
+    window.addEventListener("blur", closeCtx);
+  }
 })();

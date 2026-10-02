@@ -183,3 +183,25 @@ def test_enlaces_publicos_desactivados(make_app):
         node = upload(client, "x.txt", b"x")
         response = client.post(f"/api/files/{node['id']}/links", data={})
         assert response.status_code == 403
+
+
+def test_menu_contextual_comparte_con_la_sesion_web(client):
+    # El clic derecho de la web llama a la API con la cookie de sesión.
+    register(client, "bob")
+    register(client, "ana")
+    login(client, "ana")
+    node = upload(client, "nota.txt", b"hola")
+
+    enlace = client.post(f"/api/files/{node['id']}/links", data={"mode": "download"})
+    assert enlace.status_code == 201, enlace.text
+    assert enlace.json()["url"].startswith("http")
+
+    share = client.post(f"/api/files/{node['id']}/shares", data={"username": "bob", "permission": "write"})
+    assert share.status_code == 201, share.text
+    assert share.json() == {"id": share.json()["id"], "user": "bob", "permission": "write"}
+
+    nadie = client.post(f"/api/files/{node['id']}/shares", data={"username": "nadie"})
+    assert nadie.status_code == 404 and nadie.json()["detail"] == "No existe ese usuario."
+
+    pagina = client.get("/files")
+    assert f'data-id="{node["id"]}"' in pagina.text and "data-can-share" in pagina.text
