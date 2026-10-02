@@ -51,6 +51,8 @@ if [ -x "$HERE/build/drive-sync" ]; then
   install -m 0755 "$HERE/build/drive-sync" /usr/local/bin/drive-sync
   install -Dm 0644 "$HERE/app/icon.png" /usr/share/icons/hicolor/256x256/apps/drive-sync.png
   install -Dm 0644 "$HERE/deploy/drive-sync.desktop" /usr/share/applications/drive-sync.desktop
+  # Sin esto el lanzador puede seguir mostrando el icono anterior.
+  gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true
 fi
 
 sed "s/@USER@/$APP_USER/" "$HERE/deploy/drive-sync.service" > /etc/systemd/system/drive-sync.service
