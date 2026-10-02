@@ -1,4 +1,4 @@
-// Drive Sync — interfaz. Habla con el servicio a través de las rutas /api de esta app.
+// Drive — interfaz de escritorio: explorador de Drive y sincronización. Habla con el servicio a través de las rutas /api de esta app.
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
@@ -51,6 +51,7 @@
   // ------------------------------------------------------------- estado
   var state = { status: null };
   var showSettings = false;
+  var tab = "files", filesLoaded = false;
 
   function chip(link) {
     var s = link.enabled ? link.status : "en pausa";
@@ -77,13 +78,16 @@
     var s = state.status, banner = $("banner");
     if (!s || s.error && s.configured === undefined) {
       banner.hidden = false; banner.textContent = (s && s.error) || "Conectando con el servicio…";
-      $("onboarding").hidden = true; $("links-section").hidden = true; $("conn").innerHTML = "";
+      $("onboarding").hidden = true; $("links-section").hidden = true; $("files-section").hidden = true; $("tabs").hidden = true; $("conn").innerHTML = "";
       return;
     }
     banner.hidden = true;
     var needSetup = !s.configured || showSettings;
     $("onboarding").hidden = !needSetup;
-    $("links-section").hidden = needSetup;
+    $("tabs").hidden = needSetup;
+    $("links-section").hidden = needSetup || tab !== "sync";
+    $("files-section").hidden = needSetup || tab !== "files";
+    if (!needSetup && tab === "files" && !filesLoaded) { filesLoaded = true; loadFiles(); }
     $("settings-cancel").hidden = !s.configured;
     $("conn").innerHTML = s.configured
       ? '<span class="dot ' + (s.online ? "on" : "off") + '"></span>' + (s.online ? "Conectado como <b>" + esc(s.user) + "</b> · " : "Sin conexión con ") + esc(s.server_url)
@@ -102,6 +106,75 @@
       }).join("") || '<li class="muted">Sin actividad todavía.</li>';
     });
   }
+
+  // ------------------------------------------------------------- pestañas
+  $("tabs").onclick = function (e) {
+    var b = e.target.closest("button[data-tab]"); if (!b) { return; }
+    tab = b.dataset.tab;
+    [].forEach.call($("tabs").children, function (x) { x.classList.toggle("on", x === b); });
+    render();
+  };
+
+  // ------------------------------------------------- explorador de Drive
+  function size(n) {
+    var u = ["B", "KB", "MB", "GB", "TB"], i = 0, v = +n || 0;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return i ? v.toFixed(1) + " " + u[i] : v + " B";
+  }
+  // El servidor da fechas UTC sin zona.
+  function when(iso) { return iso ? ago(Date.parse(/[zZ]|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z")) : ""; }
+  var files = { stack: [{ id: "", name: "Mi unidad" }] };
+  function msg(text, isError) {
+    var m = $("f-msg"); m.hidden = !text; m.textContent = text || ""; m.className = isError ? "error" : "muted";
+  }
+  function loadFiles() {
+    var cur = files.stack[files.stack.length - 1];
+    $("f-crumbs").innerHTML = files.stack.map(function (c, i) {
+      return (i ? icon("chev") : "") + '<button type="button" data-i="' + i + '">' + esc(c.name) + "</button>";
+    }).join("");
+    api("GET", "/api/remote/list?parent_id=" + encodeURIComponent(cur.id)).then(function (r) {
+      if (!r.ok) { $("f-rows").innerHTML = '<tr class="none"><td colspan="4">' + esc(r.body.error || "No se pudo leer Drive") + "</td></tr>"; return; }
+      $("f-rows").innerHTML = r.body.items.map(function (f) {
+        return '<tr class="' + (f.is_dir ? "dir" : "file") + '" data-id="' + esc(f.id) + '" data-name="' + esc(f.name) + '">' +
+          '<td><span class="name">' + icon(f.is_dir ? "folder" : "file") + esc(f.name) + "</span></td>" +
+          '<td class="num-col muted">' + size(f.size) + "</td>" +
+          '<td class="muted">' + esc(when(f.updated_at)) + "</td>" +
+          '<td class="num-col">' + (f.is_dir ? "" : '<button class="ghost small icon" data-act="download" title="Descargar" aria-label="Descargar">' + icon("download") + "</button>") + "</td></tr>";
+      }).join("") || '<tr class="none"><td colspan="4">Carpeta vacía</td></tr>';
+    });
+  }
+  $("f-crumbs").onclick = function (e) { var b = e.target.closest("button"); if (b) { files.stack = files.stack.slice(0, +b.dataset.i + 1); msg(""); loadFiles(); } };
+  $("f-rows").onclick = function (e) {
+    var tr = e.target.closest("tr[data-id]"); if (!tr) { return; }
+    if (e.target.closest("button[data-act=download]")) {
+      msg("Descargando «" + tr.dataset.name + "»…");
+      api("POST", "/api/remote/download", { id: tr.dataset.id, name: tr.dataset.name }).then(function (r) {
+        if (r.body.cancelled) { msg(""); return; }
+        msg(r.ok ? "Descargado en " + r.body.path : (r.body.error || "No se pudo descargar."), !r.ok);
+      });
+      return;
+    }
+    if (tr.classList.contains("dir")) { files.stack.push({ id: tr.dataset.id, name: tr.dataset.name }); msg(""); loadFiles(); }
+  };
+  $("f-upload").onclick = function () {
+    var cur = files.stack[files.stack.length - 1];
+    msg("Elige el fichero…");
+    api("POST", "/api/remote/upload", { parent_id: cur.id }).then(function (r) {
+      if (r.body.cancelled) { msg(""); return; }
+      msg(r.ok ? "Subido." : (r.body.error || "No se pudo subir."), !r.ok);
+      loadFiles();
+    });
+  };
+  $("f-mkdir").onclick = function () {
+    promptDialog("Nueva carpeta en Drive", "Crear").then(function (name) {
+      if (!name) { return; }
+      api("POST", "/api/remote/folders", { parent_id: files.stack[files.stack.length - 1].id, name: name }).then(function (r) {
+        if (!r.ok) { msg(r.body.error || "No se pudo crear.", true); }
+        loadFiles();
+      });
+    });
+  };
+  $("f-web").onclick = function () { api("POST", "/api/open-web", { id: files.stack[files.stack.length - 1].id }); };
 
   // ---------------------------------------------------------------- ajustes
   $("btn-settings").onclick = function () {
@@ -135,14 +208,23 @@
   };
 
   // ------------------------------------------------------- añadir carpeta
-  var add = { local: "", stack: [{ id: "", name: "Drive" }] };
+  // Dos modos: «upload» crea en Drive una carpeta nueva (con el nombre de la
+  // local) dentro de la elegida; «link» enlaza exactamente las dos elegidas.
+  var add = { mode: "link", local: "", stack: [{ id: "", name: "Drive" }] };
+  function summary() {
+    var cur = add.stack[add.stack.length - 1];
+    var local = add.local ? "«" + base(add.local) + "»" : "la carpeta local";
+    $("add-summary").textContent = add.mode === "upload"
+      ? "Se creará " + local + " dentro de «" + cur.name + "» en Drive y se enlazará con ella."
+      : "Se enlazará " + local + " con «" + cur.name + "»" + (cur.id ? "" : " (todo tu Drive)") + ". Lo que falte en un lado se copia al otro.";
+  }
   function crumbs() {
     $("crumbs").innerHTML = add.stack.map(function (c, i) {
       return (i ? icon("chev") : "") + '<button type="button" data-i="' + i + '">' + esc(c.name) + "</button>";
     }).join("");
   }
   function loadFolders() {
-    crumbs();
+    crumbs(); summary();
     var cur = add.stack[add.stack.length - 1];
     $("folders").innerHTML = '<li class="none">Cargando…</li>';
     api("GET", "/api/remote/folders?parent_id=" + encodeURIComponent(cur.id)).then(function (r) {
@@ -162,14 +244,20 @@
       });
     });
   };
-  $("btn-add").onclick = function () {
-    add = { local: "", stack: [{ id: "", name: "Drive" }] };
+  function openAdd(mode) {
+    add = { mode: mode, local: "", stack: [{ id: "", name: "Drive" }] };
+    var up = mode === "upload";
+    $("add-title").textContent = up ? "Subir una carpeta" : "Enlazar carpetas";
+    $("remote-label").textContent = up ? "Dónde crearla en Drive (entra en la carpeta)" : "Carpeta de Drive con la que enlazar (entra en ella)";
+    $("add-ok").textContent = up ? "Subir y enlazar" : "Enlazar";
     $("local-path").textContent = "ninguna elegida"; $("add-ok").disabled = true; $("add-error").hidden = true;
     $("dlg-add").showModal(); loadFolders();
-  };
+  }
+  $("btn-upload").onclick = function () { openAdd("upload"); };
+  $("btn-link").onclick = function () { openAdd("link"); };
   $("pick-local").onclick = function () {
     api("POST", "/api/pick-folder").then(function (r) {
-      if (r.ok && r.body.path) { add.local = r.body.path; $("local-path").textContent = add.local; $("local-path").title = add.local; $("add-ok").disabled = false; }
+      if (r.ok && r.body.path) { add.local = r.body.path; $("local-path").textContent = add.local; $("local-path").title = add.local; $("add-ok").disabled = false; summary(); }
     });
   };
   $("add-cancel").onclick = function () { $("dlg-add").close(); };
@@ -183,7 +271,7 @@
     };
     $("add-ok").disabled = true;
     var done = function () { $("add-ok").disabled = !add.local; };
-    if ($("make-subfolder").checked) {
+    if (add.mode === "upload") {
       api("POST", "/api/remote/folders", { parent_id: cur.id, name: base(add.local) }).then(function (r) {
         if (!r.ok) { $("add-error").hidden = false; $("add-error").textContent = r.body.error; done(); return; }
         link(r.body.id, r.body.name).then(done);
@@ -191,7 +279,46 @@
     } else { link(cur.id, cur.name).then(done); }
   };
 
+  // ------------------------------------------------------- actualizaciones
+  function checkUpdate() {
+    api("GET", "/api/update").then(function (r) {
+      if (!r.ok || !r.body.available) { return; }
+      $("update-commits").innerHTML = r.body.commits.map(function (c) {
+        var i = c.indexOf(" ");
+        return "<li><code>" + esc(c.slice(0, i)) + "</code>" + esc(c.slice(i + 1)) + "</li>";
+      }).join("");
+      $("dlg-update").showModal();
+    });
+  }
+  $("update-later").onclick = function () { $("dlg-update").close(); };
+  $("update-go").onclick = function () {
+    var go = $("update-go"), log = $("update-log");
+    if (go.dataset.done) { api("POST", "/api/restart"); return; }
+    go.disabled = true; $("update-later").disabled = true; log.hidden = false; log.textContent = "Empezando…";
+    api("POST", "/api/update").then(function (r) {
+      if (!r.ok) { log.textContent = r.body.error || "No se pudo empezar."; go.disabled = false; $("update-later").disabled = false; return; }
+      var poll = setInterval(function () {
+        api("GET", "/api/update/log").then(function (l) {
+          if (!l.ok) { return; }
+          log.textContent = l.body.log; log.scrollTop = log.scrollHeight;
+          if (l.body.state === "running") { return; }
+          clearInterval(poll);
+          $("update-later").disabled = false;
+          go.disabled = false;
+          if (l.body.state === "done") {
+            go.dataset.done = "1"; go.textContent = "Reiniciar Drive";
+            $("update-hint").textContent = "Actualizado. Reinicia la ventana para usar la versión nueva (la sincronización ya corre con ella).";
+          } else {
+            go.textContent = "Reintentar";
+            $("update-hint").textContent = "No se pudo actualizar. Abajo está el motivo.";
+          }
+        });
+      }, 1500);
+    });
+  };
+
   api("POST", "/api/chrome");
+  checkUpdate();
   refresh(); refreshEvents();
   setInterval(refresh, 2000); setInterval(refreshEvents, 4000);
 })();

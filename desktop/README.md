@@ -23,7 +23,7 @@ ficheros al día en cada máquina.
 | | | |
 |---|---|---|
 | `daemon/` | **servicio** | LuxScript. Sincroniza. Corre con `lux`, sin ventana. |
-| `app/` | **ventana** | LuxScript + GTK/WebKit. Sólo mando a distancia del servicio. |
+| `app/` | **ventana** | LuxScript + GTK/WebKit. Pestañas «Archivos» (explorar, subir, descargar) y «Sincronización»; todo pasa por el servicio. |
 | `deploy/` | instalación | unidad de systemd e instalador |
 | `vendor/lux/` | Lux | copia de Lux (ver [Lux vendorizado](#lux-vendorizado)) |
 
@@ -45,6 +45,16 @@ Drive: *Perfil → Tokens de API*, con los ámbitos `read` y `write`), y pulsa
 
 El servicio arranca con la máquina (`systemctl status drive-sync`, registro en
 `journalctl -u drive-sync -f`). Cerrar la ventana no lo para.
+
+## Actualizar
+
+Al abrir la ventana se compara el commit instalado con GitHub (`git fetch` en el
+repositorio desde el que se instaló; `install.sh` lo anota en
+`/opt/drive-sync/source` y `version`). Si hay cambios sale un aviso con la lista;
+**Actualizar** ejecuta `deploy/update.sh` en segundo plano: `git pull --ff-only`,
+compilar y `pkexec deploy/install.sh`. La contraseña la pide el diálogo del
+sistema (polkit), una vez, sólo para instalar; la app nunca la ve. Registro en
+`~/.cache/drive-update.log`.
 
 ## Cómo sincroniza
 

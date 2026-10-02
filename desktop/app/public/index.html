@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Drive Sync</title>
+  <title>Drive</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -19,14 +19,20 @@
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></symbol>
   <symbol id="i-arrows" viewBox="0 0 24 24"><path d="M7 7h13M16 3l4 4-4 4M17 17H4M8 13l-4 4 4 4"/></symbol>
   <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 20V9M7 14l5-5 5 5M5 4h14"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
   <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
 </defs></svg>
 
 <header class="top">
-  <div class="brand"><span class="logo"><svg class="ico"><use href="#i-cloud"/></svg></span><b>Drive Sync</b></div>
+  <div class="brand"><span class="logo"><svg class="ico"><use href="#i-cloud"/></svg></span><b>Drive</b></div>
+  <nav id="tabs" class="tabs" hidden>
+    <button data-tab="files" class="on"><svg class="ico"><use href="#i-cloud"/></svg>Archivos</button>
+    <button data-tab="sync"><svg class="ico"><use href="#i-sync"/></svg>Sincronización</button>
+  </nav>
   <div id="conn" class="conn"></div>
   <div class="actions">
-    <button id="btn-sync" class="ghost" title="Sincronizar ahora"><svg class="ico"><use href="#i-sync"/></svg>Sincronizar</button>
     <button id="btn-settings" class="ghost" title="Servidor y token"><svg class="ico"><use href="#i-gear"/></svg>Ajustes</button>
   </div>
 </header>
@@ -47,10 +53,32 @@
     </form>
   </section>
 
+  <section id="files-section" hidden>
+    <div class="head">
+      <nav id="f-crumbs" class="crumbs big"></nav>
+      <div class="row">
+        <button id="f-web" class="ghost small" title="Compartir, versiones, papelera…"><svg class="ico"><use href="#i-open"/></svg>Abrir en la web</button>
+        <button id="f-mkdir"><svg class="ico"><use href="#i-plus"/></svg>Nueva carpeta</button>
+        <button id="f-upload" class="primary"><svg class="ico"><use href="#i-upload"/></svg>Subir fichero</button>
+      </div>
+    </div>
+    <p id="f-msg" class="muted" hidden></p>
+    <div class="card flush">
+      <table class="files">
+        <thead><tr><th>Nombre</th><th class="num-col">Tamaño</th><th>Modificado</th><th></th></tr></thead>
+        <tbody id="f-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
   <section id="links-section" hidden>
     <div class="head">
       <h1>Carpetas sincronizadas</h1>
-      <button id="btn-add" class="primary"><svg class="ico"><use href="#i-plus"/></svg>Añadir carpeta</button>
+      <div class="row">
+        <button id="btn-sync" class="ghost" title="Sincronizar ahora"><svg class="ico"><use href="#i-sync"/></svg>Sincronizar</button>
+        <button id="btn-upload" class="ghost" title="Crea en Drive una carpeta nueva con el contenido de una de este equipo"><svg class="ico"><use href="#i-plus"/></svg>Subir carpeta</button>
+        <button id="btn-link" class="primary" title="Enlaza una carpeta de este equipo con una que ya existe en Drive"><svg class="ico"><use href="#i-arrows"/></svg>Enlazar carpetas</button>
+      </div>
     </div>
     <div id="links"></div>
     <div id="empty" class="empty" hidden>
@@ -65,23 +93,36 @@
 
 <!-- Añadir carpeta -->
 <dialog id="dlg-add" class="modal wide">
-  <h2>Enlazar una carpeta</h2>
+  <h2 id="add-title">Enlazar carpetas</h2>
   <div class="step"><span class="num">1</span><div class="grow">
     <label>Carpeta de este equipo</label>
     <div class="row"><button id="pick-local" type="button"><svg class="ico"><use href="#i-folder"/></svg>Elegir carpeta…</button>
       <span id="local-path" class="path muted">ninguna elegida</span></div>
   </div></div>
   <div class="step"><span class="num">2</span><div class="grow">
-    <label>Dónde guardarla en Drive</label>
+    <label id="remote-label">Carpeta de Drive</label>
     <nav id="crumbs" class="crumbs"></nav>
     <ul id="folders" class="folders"></ul>
     <div class="row between">
       <button id="new-remote" type="button" class="ghost small"><svg class="ico"><use href="#i-plus"/></svg>Nueva carpeta aquí</button>
-      <label class="check"><input type="checkbox" id="make-subfolder" checked> Crear dentro una carpeta con el nombre de la local</label>
     </div>
+    <p id="add-summary" class="muted"></p>
   </div></div>
   <p id="add-error" class="error" hidden></p>
   <div class="actions-end"><button id="add-cancel" type="button">Cancelar</button><button id="add-ok" type="button" class="primary" disabled>Enlazar</button></div>
+</dialog>
+
+<!-- Actualización disponible: sale al abrir la app si GitHub tiene cambios -->
+<dialog id="dlg-update" class="modal wide">
+  <h2>Hay una versión nueva de Drive</h2>
+  <p class="muted">Cambios desde la versión instalada:</p>
+  <ul id="update-commits" class="commits"></ul>
+  <p id="update-hint" class="muted">Se descarga, se compila y se instala. Tu sistema pedirá la contraseña una vez, para instalar.</p>
+  <pre id="update-log" class="log" hidden></pre>
+  <div class="actions-end">
+    <button id="update-later" type="button">Más tarde</button>
+    <button id="update-go" type="button" class="primary">Actualizar</button>
+  </div>
 </dialog>
 
 <!-- Confirmación y petición de texto genéricas -->

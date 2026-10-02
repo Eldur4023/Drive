@@ -128,3 +128,44 @@ post endpoint("/api/remote/folders", Json body):
     if not r["ok"]:
         return { "ok": false, "error": r["error"] }.status(502)
     return { "ok": true, "id": r["body"]["id"], "name": r["body"]["name"] }.status(201)
+
+# --- Explorador de Drive (apartado «Archivos» de la ventana) ----------------
+
+# Lo que hay en una carpeta de Drive: carpetas y ficheros, con tamaño y fecha.
+get endpoint("/api/remote/list"):
+    await need_token()
+    string parent = query("parent_id", "")
+    string path = "/api/files"
+    if parent != "":
+        path = path + "?parent_id=" + parent
+    Json r = await api_get(path)
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    List<Json> items = []
+    List<Json> all = r["body"]["items"]
+    for Json it in all:
+        items.add({ "id": it["id"], "name": it["name"], "is_dir": it["is_dir"], "size": it["size"], "updated_at": it["updated_at"] })
+    return { "ok": true, "items": items }
+
+# Baja un fichero a la ruta que eligió el usuario en el diálogo de guardar.
+post endpoint("/api/remote/download", Json body):
+    await need_token()
+    string dest = str(body["dest"])
+    if not dest.starts_with("/") or not os.is_dir(os.path_dirname(dest)):
+        return { "ok": false, "error": "ruta de destino no válida: " + dest }.status(400)
+    Json r = await remote_download(str(body["id"]), dest)
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    return { "ok": true, "path": dest }
+
+# Sube un fichero del equipo a una carpeta de Drive (sin pisar: si el nombre
+# existe, Drive lo desambigua).
+post endpoint("/api/remote/upload", Json body):
+    await need_token()
+    string path = str(body["path"])
+    if not os.is_file(path):
+        return { "ok": false, "error": "no existe el fichero: " + path }.status(400)
+    Json r = await remote_upload(str(body["parent_id"]), os.path_basename(path), path, false)
+    if not r["ok"]:
+        return { "ok": false, "error": r["error"] }.status(502)
+    return { "ok": true }

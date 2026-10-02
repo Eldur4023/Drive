@@ -1,4 +1,4 @@
-/* Drive Sync — mismo lenguaje visual que la web de Drive. */
+/* Drive — mismo lenguaje visual que la web de Drive. */
 :root {
   --bg:#f3f4fa; --surface:#fff; --surface-2:#f0f1f8; --surface-3:#e6e8f3; --border:#e3e5f0; --border-strong:#cfd3e4;
   --text:#171a2b; --muted:#667090; --accent:#5b5bf0; --accent-2:#8b5cf6; --accent-soft:rgba(91,91,240,.10);
@@ -103,3 +103,30 @@ dialog h2, dialog h3 { margin:0 0 14px; }
 .folders .ico { color:#f5a524; fill:color-mix(in srgb,#f5a524 22%,transparent); }
 .folders .none { color:var(--muted); cursor:default; justify-content:center; } .folders .none:hover { background:none; }
 dialog input { margin-top:4px; }
+
+/* pestañas: Archivos / Sincronización */
+.tabs { display:flex; gap:4px; padding:4px; border-radius:12px; background:var(--surface-2); }
+.tabs button { border:0; background:transparent; color:var(--muted); padding:6px 14px; }
+.tabs button.on { background:var(--surface); color:var(--text); box-shadow:var(--shadow); }
+
+/* explorador de Drive */
+.crumbs.big button { font-size:18px; font-weight:650; padding:4px 8px; }
+.card.flush { padding:0; overflow:hidden; }
+table.files { width:100%; border-collapse:collapse; font-size:14px; }
+.files th { text-align:left; font-size:12.5px; font-weight:600; color:var(--muted); padding:10px 14px; border-bottom:1px solid var(--border); }
+.files td { padding:8px 14px; border-bottom:1px solid var(--border); }
+.files tr:last-child td { border-bottom:0; }
+.files .num-col { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.files td.muted { white-space:nowrap; }
+.files tbody tr:hover { background:var(--surface-2); }
+.files .name { display:flex; align-items:center; gap:10px; cursor:default; }
+.files .dir .name { cursor:pointer; font-weight:550; }
+.files .dir .ico { color:#f5a524; fill:color-mix(in srgb,#f5a524 22%,transparent); }
+.files .none td { text-align:center; color:var(--muted); padding:28px; }
+@media (max-width: 640px) { .files th:nth-child(3), .files td:nth-child(3) { display:none; } }
+
+/* actualización */
+.commits { margin:0 0 12px; padding-left:18px; max-height:160px; overflow:auto; font-size:13.5px; }
+.commits code { color:var(--muted); margin-right:6px; }
+.log { font:12px/1.45 ui-monospace,Menlo,monospace; background:var(--surface-2); border:1px solid var(--border); border-radius:10px;
+  padding:10px 12px; max-height:220px; overflow:auto; white-space:pre-wrap; margin:0; }

@@ -41,6 +41,11 @@ rm -rf /opt/drive-sync/daemon
 cp -r "$HERE/daemon" /opt/drive-sync/daemon
 /opt/drive-sync/lux --check /opt/drive-sync/daemon
 
+# Para que la ventana busque actualizaciones: de qué repositorio y commit se instaló.
+REPO=$(cd "$HERE/.." && pwd)
+echo "$REPO" > /opt/drive-sync/source
+runuser -u "$APP_USER" -- git -C "$REPO" rev-parse HEAD > /opt/drive-sync/version 2>/dev/null || rm -f /opt/drive-sync/version
+
 # La ventana de escritorio (opcional): la misma que `./build/drive-sync`.
 if [ -x "$HERE/build/drive-sync" ]; then
   install -m 0755 "$HERE/build/drive-sync" /usr/local/bin/drive-sync

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
-Name=Drive Sync
-Comment=Sincroniza carpetas con Drive
+Name=Drive
+Comment=Tu Drive en el escritorio: archivos y carpetas sincronizadas
 Exec=drive-sync
 Icon=drive-sync
 Terminal=false

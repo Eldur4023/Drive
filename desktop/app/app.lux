@@ -2,8 +2,8 @@
 #
 # No sincroniza nada por sí misma: es el mando a distancia del servicio
 # (../daemon), que corre aparte como servicio de sistema. Esta app sólo hace dos
-# cosas que el servicio no puede: abrir los selectores nativos de carpeta y
-# mostrar el estado. Todo lo demás son llamadas a la API local del servicio, con
+# cosas que el servicio no puede: abrir los selectores nativos (carpetas y
+# ficheros) y mostrar Drive y el estado. Todo lo demás son llamadas a la API local del servicio, con
 # su secreto leído del fichero `api-token` (así no pasa por el navegador).
 
 import window
@@ -12,13 +12,13 @@ import http
 import json
 
 app:
-    name   "Drive Sync"
+    name   "Drive"
     # Sólo esta máquina: el runtime de escritorio se niega a arrancar si no.
     host   "127.0.0.1"
     max_body "1MB"
 
     window:
-        title     "Drive Sync"
+        title     "Drive"
         width     1000
         height    720
         resizable true
@@ -81,6 +81,39 @@ post endpoint("/api/remote/folders", Json body):
     Json r = await daemon("POST", "/api/remote/folders", body)
     return r["body"].status(r["status"])
 
+get endpoint("/api/remote/list"):
+    Json r = await daemon("GET", "/api/remote/list?parent_id=" + query("parent_id", ""), null)
+    return r["body"].status(r["status"])
+
+# Descargar: el diálogo nativo de guardar elige dónde; el servicio lo baja ahí.
+post endpoint("/api/remote/download", Json body):
+    string dest = await window.save_file(str(body["name"]))
+    if dest == "":
+        return { "ok": false, "cancelled": true }
+    Json r = await daemon("POST", "/api/remote/download", { "id": body["id"], "dest": dest })
+    return r["body"].status(r["status"])
+
+# Subir: el diálogo nativo de abrir elige el fichero; el servicio lo sube.
+post endpoint("/api/remote/upload", Json body):
+    string path = await window.open_file()
+    if path == "":
+        return { "ok": false, "cancelled": true }
+    Json r = await daemon("POST", "/api/remote/upload", { "parent_id": body["parent_id"], "path": path })
+    return r["body"].status(r["status"])
+
+# Abre un elemento en la web de Drive (compartir, versiones, papelera…).
+post endpoint("/api/open-web", Json body):
+    Json s = await daemon("GET", "/api/status", null)
+    string url = str(s["body"]["server_url"])
+    if not (url.starts_with("http://") or url.starts_with("https://")):
+        return { "ok": false }.status(400)
+    string id = str(body["id"])
+    string target = url + "/files"
+    if id != "":
+        target = target + "/" + id
+    await os.run("xdg-open", [target], { "timeout_ms": 5000 })
+    return { "ok": true }
+
 get endpoint("/api/events"):
     Json r = await daemon("GET", "/api/events", null)
     return r["body"].status(r["status"])
@@ -93,7 +126,7 @@ post endpoint("/api/pick-folder"):
 # Icono en la bandeja del sistema (clic: muestra u oculta la ventana). Lo pide la
 # propia página al cargar, cuando la ventana ya existe.
 post endpoint("/api/chrome"):
-    window.set_tray("./icon.png", "Drive Sync")
+    window.set_tray("./icon.png", "Drive")
     return status(204)
 
 # ...y abrir una carpeta en el gestor de ficheros del escritorio.
@@ -102,6 +135,82 @@ post endpoint("/api/open", Json body):
     if not os.is_dir(path):
         return { "ok": false }.status(404)
     await os.run("xdg-open", [path], { "timeout_ms": 5000 })
+    return { "ok": true }
+
+# --- Actualizaciones desde GitHub ------------------------------------------
+# install.sh deja en /opt/drive-sync de qué repositorio y commit se instaló; la
+# app compara ese commit con el de GitHub y, si hay cambios, lanza
+# deploy/update.sh (pull, compilar y `pkexec install.sh`) en segundo plano.
+
+fn string opt_dir():
+    return os.getenv("DRIVE_SYNC_OPT", "/opt/drive-sync")
+
+fn string update_log():
+    return os.path_join(os.getenv("HOME", "/tmp"), ".cache/drive-update.log")
+
+fn string source_repo():
+    if not os.path_exists(opt_dir() + "/source"):
+        return ""
+    string repo = await os.read_file(opt_dir() + "/source")
+    return repo.trim()
+
+# git sin preguntar nunca credenciales por terminal (no hay terminal: se colgaría).
+fn Json git(string repo, List<string> args, int timeout):
+    List<string> argv = ["-C", repo]
+    for string arg in args:
+        argv.add(arg)
+    return await os.run("git", argv, { "timeout_ms": timeout, "env": { "GIT_TERMINAL_PROMPT": "0" } })
+
+get endpoint("/api/update"):
+    string repo = await source_repo()
+    if repo == "" or not os.is_dir(repo):
+        return { "available": false, "error": "instalación sin repositorio de origen (reinstala con deploy/install.sh)" }
+    string current = ""
+    if os.path_exists(opt_dir() + "/version"):
+        string v = await os.read_file(opt_dir() + "/version")
+        current = v.trim()
+    if current == "":
+        Json head = await git(repo, ["rev-parse", "HEAD"], 5000)
+        current = str(head["stdout"]).trim()
+    Json f = await git(repo, ["fetch", "-q"], 60000)
+    if f["status"] != 0:
+        return { "available": false, "error": "no se pudo consultar GitHub: " + str(f["stderr"]).trim() }
+    Json log = await git(repo, ["log", "--format=%h %s", current + "..@{u}"], 5000)
+    List<string> commits = []
+    List<string> lines = str(log["stdout"]).split("\n")
+    for string line in lines:
+        if line.trim() != "":
+            commits.add(line.trim())
+    return { "available": len(commits) > 0, "commits": commits }
+
+post endpoint("/api/update"):
+    string repo = await source_repo()
+    if repo == "":
+        return { "ok": false, "error": "no se sabe desde dónde se instaló" }.status(400)
+    os.make_dir(os.path_dirname(update_log()))
+    # setsid -f: el script sigue aunque se cierre la ventana; la salida, al registro.
+    await os.run("setsid", ["-f", "bash", "-c", "exec bash \"$0\" > \"$1\" 2>&1 < /dev/null",
+        os.path_join(repo, "desktop/deploy/update.sh"), update_log()],
+        { "timeout_ms": 5000, "env": { "GIT_TERMINAL_PROMPT": "0" } })
+    return { "ok": true }
+
+get endpoint("/api/update/log"):
+    if not os.path_exists(update_log()):
+        return { "state": "idle", "log": "" }
+    string text = await os.read_file(update_log())
+    string state = "running"
+    if text.contains("==> LISTO"):
+        state = "done"
+    else if text.contains("==> ERROR"):
+        state = "error"
+    if len(text) > 4000:
+        text = text.slice(len(text) - 4000, len(text))
+    return { "state": state, "log": text }
+
+# Tras actualizar: abre la versión nueva y cierra esta.
+post endpoint("/api/restart"):
+    await os.run("setsid", ["-f", "sh", "-c", "sleep 1; exec /usr/local/bin/drive-sync"], { "timeout_ms": 5000 })
+    window.close()
     return { "ok": true }
 
 # Una ruta de la API que no existe es un 404, no la página de inicio (spa lo tragaría).
