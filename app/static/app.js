@@ -24,23 +24,6 @@
     return (i ? n.toFixed(1) : n) + " " + u[i];
   };
 
-  // ------------------------------------------------------------- tema
-  // Alterna claro/oscuro en el navegador; la preferencia guardada en el perfil
-  // sigue mandando al cargar si no se ha tocado el botón.
-  var root = document.documentElement;
-  var savedTheme = store.get("drive-theme");
-  if (savedTheme) { root.setAttribute("data-theme", savedTheme); }
-  var themeBtn = $("[data-theme-toggle]");
-  if (themeBtn) {
-    themeBtn.addEventListener("click", function () {
-      var dark = root.getAttribute("data-theme") === "dark" ||
-        (root.getAttribute("data-theme") !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-      var next = dark ? "light" : "dark";
-      root.setAttribute("data-theme", next);
-      store.set("drive-theme", next);
-    });
-  }
-
   // Cierra el menú de cuenta al pulsar fuera o con Escape.
   var menu = $("details.menu");
   if (menu) {

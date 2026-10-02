@@ -1,19 +1,14 @@
 /* Drive — mismo lenguaje visual que la web de Drive. */
 :root {
-  --bg:#f3f4fa; --surface:#fff; --surface-2:#f0f1f8; --surface-3:#e6e8f3; --border:#e3e5f0; --border-strong:#cfd3e4;
-  --text:#171a2b; --muted:#667090; --accent:#5b5bf0; --accent-2:#8b5cf6; --accent-soft:rgba(91,91,240,.10);
+  /* Paleta única de Drive: negro cálido con acento naranja. Sin modo claro. */
+  --bg:#141413; --surface:#1f1e1c; --surface-2:#262523; --surface-3:#302f2c; --border:#33312e; --border-strong:#4a4743;
+  --text:#f5f3ec; --muted:#a8a397; --accent:#d97757; --accent-2:#b8532f; --accent-soft:rgba(217,119,87,.14);
   --grad:linear-gradient(135deg,var(--accent),var(--accent-2));
-  --ok-bg:#e3f6ec; --ok:#14744a; --err-bg:#fdecec; --err:#b42323; --warn-bg:#fff4d6; --warn:#865d00;
-  --radius:14px; --shadow:0 1px 2px rgba(23,26,43,.05),0 8px 24px -8px rgba(23,26,43,.10);
-  --glow:radial-gradient(900px 500px at 85% -10%,rgba(124,92,255,.14),transparent 60%);
+  --ok-bg:#16291d; --ok:#86d9a4; --err-bg:#3a1a17; --err:#ff9b8a; --warn-bg:#352a12; --warn:#f5c86a;
+  --radius:14px; --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -8px rgba(0,0,0,.55);
+  --glow:radial-gradient(900px 500px at 85% -10%,rgba(217,119,87,.16),transparent 60%);
+  color-scheme: dark;
 }
-@media (prefers-color-scheme: dark) { :root {
-  --bg:#0d0f17; --surface:#151826; --surface-2:#1b1f31; --surface-3:#242941; --border:#252a40; --border-strong:#353b58;
-  --text:#e8eaf6; --muted:#98a0c0; --accent:#8286ff; --accent-2:#a78bfa; --accent-soft:rgba(130,134,255,.14);
-  --ok-bg:#13301f; --ok:#7ee2a8; --err-bg:#3a1a1e; --err:#ff9da4; --warn-bg:#362d10; --warn:#ffd772;
-  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -8px rgba(0,0,0,.5);
-  --glow:radial-gradient(900px 500px at 85% -10%,rgba(124,92,255,.20),transparent 60%);
-  color-scheme: dark; } }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin:0; background:var(--bg) ; background-image:var(--glow); background-attachment:fixed; color:var(--text);
@@ -88,7 +83,7 @@ input[type=checkbox] { width:18px; height:18px; accent-color:var(--accent); }
 /* diálogos */
 dialog.modal { border:1px solid var(--border); border-radius:20px; padding:26px; width:min(440px,92vw); background:var(--surface); color:var(--text); box-shadow:0 20px 60px -12px rgba(0,0,0,.4); }
 dialog.modal.wide { width:min(620px,94vw); }
-dialog.modal::backdrop { background:rgba(10,12,24,.5); backdrop-filter:blur(4px); }
+dialog.modal::backdrop { background:rgba(0,0,0,.6); backdrop-filter:blur(4px); }
 dialog h2, dialog h3 { margin:0 0 14px; }
 .actions-end { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
 .step { display:flex; gap:14px; margin:16px 0; } .grow { flex:1; min-width:0; }
@@ -100,7 +95,7 @@ dialog h2, dialog h3 { margin:0 0 14px; }
 .folders { list-style:none; margin:0; padding:4px; max-height:200px; overflow:auto; border:1px solid var(--border); border-radius:12px; background:var(--surface-2); }
 .folders li { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:9px; cursor:pointer; }
 .folders li:hover { background:var(--accent-soft); }
-.folders .ico { color:#f5a524; fill:color-mix(in srgb,#f5a524 22%,transparent); }
+.folders .ico { color:#e8a04c; fill:color-mix(in srgb,#e8a04c 22%,transparent); }
 .folders .none { color:var(--muted); cursor:default; justify-content:center; } .folders .none:hover { background:none; }
 dialog input { margin-top:4px; }
 
@@ -121,7 +116,7 @@ table.files { width:100%; border-collapse:collapse; font-size:14px; }
 .files tbody tr:hover { background:var(--surface-2); }
 .files .name { display:flex; align-items:center; gap:10px; cursor:default; }
 .files .dir .name { cursor:pointer; font-weight:550; }
-.files .dir .ico { color:#f5a524; fill:color-mix(in srgb,#f5a524 22%,transparent); }
+.files .dir .ico { color:#e8a04c; fill:color-mix(in srgb,#e8a04c 22%,transparent); }
 .files .none td { text-align:center; color:var(--muted); padding:28px; }
 @media (max-width: 640px) { .files th:nth-child(3), .files td:nth-child(3) { display:none; } }
 

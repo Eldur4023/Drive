@@ -43,7 +43,6 @@ SETTINGS_GROUPS: dict[str, list[Setting]] = {
         Setting("app.base_url", "URL pública", "str",
                 "Se usa para construir los enlaces compartidos."),
         Setting("app.timezone", "Zona horaria", "str"),
-        Setting("ui.theme", "Tema por defecto", "choice", options=("auto", "light", "dark")),
         Setting("ui.items_per_page", "Elementos por página", "int"),
         Setting("ui.footer_text", "Texto del pie", "str"),
     ],

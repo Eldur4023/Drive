@@ -53,14 +53,6 @@
     {% set prefs = principal.user.preferences or {} %}
     <form method="post" action="/profile/preferences">
       <div class="field">
-        <label for="theme">Tema</label>
-        <select id="theme" name="theme">
-          {% for value, label in [('auto','Según el sistema'), ('light','Claro'), ('dark','Oscuro')] %}
-            <option value="{{ value }}" {% if prefs.get('theme', config.ui.theme) == value %}selected{% endif %}>{{ label }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div class="field">
         <label for="order">Orden por defecto</label>
         <select id="order" name="order">
           {% for value, label in [('name','Nombre'), ('size','Tamaño'), ('modified','Modificación'), ('created','Creación')] %}

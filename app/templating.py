@@ -126,12 +126,6 @@ def render(
             "principal": principal,
             "can": can,
             "app_name": config.app.name,
-            "theme": (
-                (principal.user.preferences or {}).get("theme")
-                if principal and principal.user
-                else None
-            )
-            or config.ui.theme,
             **context,
         },
         status_code=status_code,

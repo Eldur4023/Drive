@@ -296,6 +296,7 @@ class AuditConfig(_Base):
 
 
 class UiConfig(_Base):
+    # Ya no se usa (sólo hay tema oscuro); se acepta para no romper configs antiguas.
     theme: Literal["auto", "light", "dark"] = "auto"
     items_per_page: int = 100
     show_trusted_network_hint: bool = True

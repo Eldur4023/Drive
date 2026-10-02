@@ -301,7 +301,6 @@ audit:
 # Interfaz
 # -----------------------------------------------------------------------------
 ui:
-  theme: "auto"                 # auto | light | dark
   items_per_page: 100
   # Mostrar en el login un aviso de que la red actual es de confianza.
   show_trusted_network_hint: true

@@ -109,7 +109,6 @@ def update_profile(
 
 @router.post("/profile/preferences")
 def update_preferences(
-    theme: str = Form("auto"),
     order: str = Form("name"),
     view: str = Form("list"),
     items_per_page: int = Form(100),
@@ -120,7 +119,6 @@ def update_preferences(
     assert user is not None
     user.preferences = {
         **(user.preferences or {}),
-        "theme": theme if theme in ("auto", "light", "dark") else "auto",
         "order": order if order in ("name", "size", "modified", "created") else "name",
         "view": view if view in ("list", "grid") else "list",
         "items_per_page": max(10, min(500, items_per_page)),

@@ -1,88 +1,38 @@
 /* Drive — hoja de estilos única, sin dependencias externas. */
 
 :root {
-  --bg: #f3f4fa;
-  --bg-glow: radial-gradient(900px 500px at 85% -10%, rgba(124, 92, 255, .14), transparent 60%),
-             radial-gradient(700px 420px at -5% 105%, rgba(56, 189, 248, .12), transparent 60%);
-  --surface: #ffffff;
-  --surface-2: #f0f1f8;
-  --surface-3: #e6e8f3;
-  --border: #e3e5f0;
-  --border-strong: #cfd3e4;
-  --text: #171a2b;
-  --muted: #667090;
-  --accent: #5b5bf0;
-  --accent-2: #8b5cf6;
-  --accent-soft: rgba(91, 91, 240, .10);
-  --accent-text: #ffffff;
+  /* Paleta única: negro cálido con acento naranja. No hay modo claro. */
+  --bg: #141413;
+  --bg-glow: radial-gradient(900px 500px at 85% -10%, rgba(217, 119, 87, .16), transparent 60%),
+             radial-gradient(700px 420px at -5% 105%, rgba(217, 119, 87, .07), transparent 60%);
+  --surface: #1f1e1c;
+  --surface-2: #262523;
+  --surface-3: #302f2c;
+  --border: #33312e;
+  --border-strong: #4a4743;
+  --text: #f5f3ec;
+  --muted: #a8a397;
+  --accent: #d97757;
+  --accent-2: #b8532f;
+  --accent-soft: rgba(217, 119, 87, .14);
+  --accent-text: #141413;
   --grad: linear-gradient(135deg, var(--accent), var(--accent-2));
-  --ok-bg: #e3f6ec;
-  --ok-text: #14744a;
-  --error-bg: #fdecec;
-  --error-text: #b42323;
-  --warn-bg: #fff4d6;
-  --warn-text: #865d00;
+  --ok-bg: #16291d;
+  --ok-text: #86d9a4;
+  --error-bg: #3a1a17;
+  --error-text: #ff9b8a;
+  --warn-bg: #352a12;
+  --warn-text: #f5c86a;
   --radius: 14px;
   --radius-sm: 10px;
-  --shadow: 0 1px 2px rgba(23, 26, 43, .05), 0 8px 24px -8px rgba(23, 26, 43, .10);
-  --shadow-lg: 0 20px 60px -12px rgba(23, 26, 43, .35);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -8px rgba(0, 0, 0, .55);
+  --shadow-lg: 0 20px 60px -12px rgba(0, 0, 0, .7);
   --ease: cubic-bezier(.2, .7, .2, 1);
+  color-scheme: dark;
 
   /* colores de tipo de fichero */
-  --k-folder: #f5a524; --k-image: #10b981; --k-video: #ef4444; --k-audio: #ec4899;
-  --k-pdf: #e5484d; --k-archive: #a16207; --k-sheet: #16a34a; --k-text: #3b82f6; --k-file: #8b93ad;
-}
-
-:root[data-theme="dark"] {
-  --bg: #0d0f17;
-  --bg-glow: radial-gradient(900px 500px at 85% -10%, rgba(124, 92, 255, .20), transparent 60%),
-             radial-gradient(700px 420px at -5% 105%, rgba(56, 189, 248, .10), transparent 60%);
-  --surface: #151826;
-  --surface-2: #1b1f31;
-  --surface-3: #242941;
-  --border: #252a40;
-  --border-strong: #353b58;
-  --text: #e8eaf6;
-  --muted: #98a0c0;
-  --accent: #8286ff;
-  --accent-2: #a78bfa;
-  --accent-soft: rgba(130, 134, 255, .14);
-  --accent-text: #0d0f17;
-  --ok-bg: #13301f;
-  --ok-text: #7ee2a8;
-  --error-bg: #3a1a1e;
-  --error-text: #ff9da4;
-  --warn-bg: #362d10;
-  --warn-text: #ffd772;
-  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -8px rgba(0, 0, 0, .5);
-  color-scheme: dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root[data-theme="auto"], :root:not([data-theme]) {
-    --bg: #0d0f17;
-    --bg-glow: radial-gradient(900px 500px at 85% -10%, rgba(124, 92, 255, .20), transparent 60%),
-               radial-gradient(700px 420px at -5% 105%, rgba(56, 189, 248, .10), transparent 60%);
-    --surface: #151826;
-    --surface-2: #1b1f31;
-    --surface-3: #242941;
-    --border: #252a40;
-    --border-strong: #353b58;
-    --text: #e8eaf6;
-    --muted: #98a0c0;
-    --accent: #8286ff;
-    --accent-2: #a78bfa;
-    --accent-soft: rgba(130, 134, 255, .14);
-    --accent-text: #0d0f17;
-    --ok-bg: #13301f;
-    --ok-text: #7ee2a8;
-    --error-bg: #3a1a1e;
-    --error-text: #ff9da4;
-    --warn-bg: #362d10;
-    --warn-text: #ffd772;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -8px rgba(0, 0, 0, .5);
-    color-scheme: dark;
-  }
+  --k-folder: #e8a04c; --k-image: #10b981; --k-video: #ef4444; --k-audio: #ec4899;
+  --k-pdf: #e5484d; --k-archive: #b98a4a; --k-sheet: #16a34a; --k-text: #60a5fa; --k-file: #a8a397;
 }
 
 * { box-sizing: border-box; }
@@ -215,20 +165,6 @@ footer { display: flex; gap: 12px; justify-content: center; padding: 18px; color
 }
 .menu-panel a:hover, .menu-panel button:hover { background: var(--surface-2); text-decoration: none; }
 .menu-panel form { margin: 0; }
-
-/* botón de tema: muestra sol u luna según el tema efectivo */
-.icon-btn {
-  width: 38px; height: 38px; padding: 0; display: grid; place-items: center;
-  border-radius: 50%; background: var(--surface); border: 1px solid var(--border); color: var(--muted);
-}
-.icon-btn:hover { color: var(--accent); border-color: var(--accent); }
-.t-moon { display: none; }
-:root[data-theme="dark"] .t-sun { display: none; }
-:root[data-theme="dark"] .t-moon { display: block; }
-@media (prefers-color-scheme: dark) {
-  :root[data-theme="auto"] .t-sun { display: none; }
-  :root[data-theme="auto"] .t-moon { display: block; }
-}
 
 /* -------------------------------------------------------------- bloques */
 
@@ -497,7 +433,7 @@ dialog.modal {
   background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); text-align: center;
 }
 dialog.modal[open] { animation: pop .2s var(--ease) both; }
-dialog.modal::backdrop { background: rgba(10, 12, 24, .5); backdrop-filter: blur(4px); }
+dialog.modal::backdrop { background: rgba(0, 0, 0, .6); backdrop-filter: blur(4px); }
 dialog.modal h3 { margin: 4px 0 6px; font-size: 19px; text-transform: none; letter-spacing: -.01em; color: var(--text); }
 dialog.modal p { margin: 0 0 20px; }
 dialog.modal .modal-icon { width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; margin: 0 auto 10px; background: var(--error-bg); color: var(--error-text); }
