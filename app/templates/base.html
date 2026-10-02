@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/favicon.svg?v=2" type="image/svg+xml">
 </head>
 {% set authed = principal and principal.is_authenticated %}
 {% set path = request.url.path if request else '' %}
