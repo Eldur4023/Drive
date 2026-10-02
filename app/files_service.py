@@ -139,6 +139,26 @@ def children_of(
     return list(db.scalars(query.order_by(Node.is_dir.desc(), columns.get(order, Node.name))))
 
 
+def folder_sizes(db: DbSession, owner_id: str) -> dict[str, int]:
+    """Tamaño de cada carpeta del usuario: la suma de lo vivo que cuelga de ella."""
+    # ponytail: lee todos los nodos del usuario en cada llamada; con cientos de
+    # miles de ficheros convendría guardar el total en la carpeta al subir/borrar.
+    rows = db.execute(
+        select(Node.id, Node.parent_id, Node.size, Node.is_dir)
+        .where(Node.owner_id == owner_id, Node.deleted_at.is_(None))
+    ).all()
+    parent = {r.id: r.parent_id for r in rows}
+    sizes = {r.id: 0 for r in rows if r.is_dir}
+    for r in rows:
+        if r.is_dir or not r.size:
+            continue
+        p = r.parent_id
+        while p is not None and p in sizes:
+            sizes[p] += r.size
+            p = parent[p]
+    return sizes
+
+
 def trashed_of(db: DbSession, owner_id: str) -> list[Node]:
     """Elementos en la papelera cuyo padre no esté también en la papelera."""
     rows = db.scalars(

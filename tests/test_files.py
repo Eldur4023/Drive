@@ -32,6 +32,24 @@ def test_carpetas_y_jerarquia(client):
     assert [step["name"] for step in detail["path"]] == ["Documentos", "dentro.txt"]
 
 
+def test_tamano_de_carpetas(client):
+    register(client, "ana")
+    login(client, "ana")
+
+    docs = client.post("/api/folders", data={"name": "Documentos"}).json()
+    sub = client.post("/api/folders", data={"name": "Sub", "parent_id": docs["id"]}).json()
+    upload(client, "a.txt", b"x" * 10, parent=docs["id"])
+    borrado = upload(client, "b.txt", b"x" * 5, parent=sub["id"])
+    upload(client, "c.txt", b"x" * 7, parent=sub["id"])
+    client.delete(f"/api/files/{borrado['id']}")  # lo de la papelera no cuenta
+
+    sizes = {i["name"]: i["size"] for i in client.get("/api/files").json()["items"]}
+    assert sizes["Documentos"] == 17
+    sizes = {i["name"]: i["size"] for i in client.get("/api/files", params={"parent_id": docs["id"]}).json()["items"]}
+    assert sizes["Sub"] == 7
+    assert '<td class="hide-sm muted">17 B</td>' in client.get("/files").text
+
+
 def test_nombres_duplicados_se_desambiguan(client):
     register(client, "ana")
     login(client, "ana")

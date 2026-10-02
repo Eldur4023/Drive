@@ -26,7 +26,7 @@
 
   <table style="margin-top:12px">
     <tr><th>Propietario</th><td>{{ owner.label if owner else '—' }}</td></tr>
-    <tr><th>Tamaño</th><td>{{ '—' if node.is_dir else node.size|size }}</td></tr>
+    <tr><th>Tamaño</th><td>{{ folder_size|size }}</td></tr>
     <tr><th>Tipo</th><td>{{ 'Carpeta' if node.is_dir else (node.mime_type or 'desconocido') }}</td></tr>
     <tr><th>Creado</th><td>{{ node.created_at|datetime }}</td></tr>
     <tr><th>Modificado</th><td>{{ node.updated_at|datetime }}</td></tr>

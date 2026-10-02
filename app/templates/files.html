@@ -118,7 +118,7 @@
               {% if item.starred %}<svg class="ico" style="color:var(--k-folder);fill:currentColor" title="Destacado"><use href="#i-star"/></svg>{% endif %}
             </div>
           </td>
-          <td class="hide-sm muted">{{ '—' if item.is_dir else item.size|size }}</td>
+          <td class="hide-sm muted">{{ (sizes.get(item.id, 0) if item.is_dir else item.size)|size }}</td>
           <td class="hide-sm muted">{{ item.updated_at|relative }}</td>
           <td class="right">
             <div class="row-actions">

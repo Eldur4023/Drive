@@ -112,7 +112,12 @@ def list_root(
         owner_id = parent.owner_id
 
     items = files_service.children_of(db, owner_id, parent_id, order=order)
-    return {"parent_id": parent_id, "items": [node_json(n) for n in items]}
+    sizes = files_service.folder_sizes(db, owner_id)
+    data = [node_json(n) for n in items]
+    for d in data:
+        if d["is_dir"]:
+            d["size"] = sizes.get(d["id"], 0)
+    return {"parent_id": parent_id, "items": data}
 
 
 @router.get("/files/{node_id}")

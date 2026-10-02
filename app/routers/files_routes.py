@@ -157,6 +157,9 @@ def browse(
     # los del propio usuario.
     owner_id = current.owner_id if current else user.id
     items = files_service.children_of(db, owner_id, current.id if current else None, order=order)
+    sizes = files_service.folder_sizes(db, owner_id)
+    if order == "size":
+        items.sort(key=lambda n: (not n.is_dir, -(sizes.get(n.id, 0) if n.is_dir else n.size)))
 
     return render(
         request,
@@ -165,6 +168,7 @@ def browse(
         current=current,
         breadcrumbs=breadcrumbs,
         items=items,
+        sizes=sizes,
         order=order,
         usage=files_service.usage_of(user, config),
         shared_count=len(files_service.shared_with(db, user.id)),
@@ -240,6 +244,7 @@ def detail(
         "detail.html",
         principal,
         node=node,
+        folder_size=files_service.folder_sizes(db, node.owner_id).get(node.id, 0) if node.is_dir else node.size,
         access=access,
         breadcrumbs=path_of(db, node),
         versions=versions,
