@@ -329,6 +329,11 @@ def save_upload(
     limit = max_upload_of(owner, config)
     stored = storage.write_stream(source, max_size=limit, config=config)
 
+    # Mismo contenido que ya hay: nada que versionar ni que cobrar. El cliente
+    # de escritorio resube ficheros sin cambios y cada vuelta sumaba una versión.
+    if existing is not None and overwrite and existing.blob_hash == stored.hash:
+        return existing
+
     # El coste para la cuota es el tamaño nuevo menos el que se reemplaza, y
     # sólo si la versión antigua no se conserva.
     replaced_size = 0

@@ -242,3 +242,16 @@ def test_arbol_de_sincronizacion(client):
     # lo que va a la papelera desaparece del árbol
     client.delete(f"/api/files/{por_ruta['raiz.txt']['id']}")
     assert "raiz.txt" not in {i["path"] for i in client.get("/api/sync/tree").json()["items"]}
+
+
+def test_resubir_el_mismo_contenido_no_cobra_ni_versiona(client):
+    register(client, "ana")
+    login(client, "ana")
+    upload(client, "doc.txt", b"x" * 300)
+    for _ in range(3):
+        client.post(
+            "/api/files",
+            data={"overwrite": "true"},
+            files={"file": ("doc.txt", b"x" * 300, "text/plain")},
+        )
+    assert client.get("/api/usage").json()["used"] == 300
