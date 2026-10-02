@@ -48,12 +48,12 @@
         </select>
       </div>
       <div class="field">
-        <label>Cuota (vacío = la del rol)</label>
-        <input name="quota" value="{{ user.quota_override|size if user.quota_override else '' }}" placeholder="p. ej. 50GB">
+        <label>Cuota (vacío = la del rol, 0 = sin límite)</label>
+        <input name="quota" value="{{ user.quota_override|size_exact }}" placeholder="p. ej. 50GB">
       </div>
       <div class="field">
         <label>Máximo por fichero (vacío = el del rol)</label>
-        <input name="max_upload" value="{{ user.max_upload_override|size if user.max_upload_override else '' }}">
+        <input name="max_upload" value="{{ user.max_upload_override|size_exact }}">
       </div>
       {% set overrides = user.permission_overrides or {} %}
       {% for name, label in [('can_upload','Subir'), ('can_delete','Borrar'), ('can_share_internal','Compartir'), ('can_share_public','Enlaces públicos')] %}

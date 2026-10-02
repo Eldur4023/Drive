@@ -168,3 +168,34 @@ def test_token_de_api_respeta_sus_ambitos(client):
         "/api/files", headers=cabecera, files={"file": ("x.txt", b"x", "text/plain")}
     )
     assert escritura.status_code == 403
+
+
+def test_guardar_usuario_no_altera_su_cuota(client):
+    import re
+
+    register(client, "jefa")
+    login(client, "jefa")
+    client.post(
+        "/admin/users",
+        data={"username": "nuevo", "password": "Contrasena1", "role": "user"},
+        follow_redirects=False,
+    )
+
+    def card() -> str:
+        page = client.get("/admin/users").text
+        return page[page.index("nuevo</span>"):]
+
+    def form_quota() -> str:
+        return re.search(r'name="quota" value="([^"]*)"', card()).group(1)
+
+    def save(quota: str) -> None:
+        uid = re.search(r'action="/admin/users/([^"/]+)"', card()).group(1)
+        client.post(f"/admin/users/{uid}", data={"role": "user", "quota": quota, "is_active": "true", "is_approved": "true"})
+
+    for typed, expected in (("1.25GB", 1342177280), ("0", 0)):
+        save(typed)
+        save(form_quota())  # volver a guardar lo que muestra el formulario
+        logout(client); login(client, "nuevo")
+        quota = client.get("/api/me").json()["quota"]
+        logout(client); login(client, "jefa")
+        assert quota == (expected or None), (typed, quota)

@@ -86,7 +86,18 @@ def icon_for(node) -> Markup:  # noqa: ANN001 — recibe un Node
     return Markup(f'<svg class="ico k-{kind}" aria-hidden="true"><use href="#i-{kind}"/></svg>')
 
 
+def format_size_exact(num: int | None) -> str:
+    """Para campos editables: sin redondeo, así guardar el formulario no lo altera."""
+    if num is None:
+        return ""
+    for unit, factor in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if num and num % factor == 0:
+            return f"{num // factor}{unit}"
+    return f"{num}B"
+
+
 templates.env.filters["size"] = format_size
+templates.env.filters["size_exact"] = format_size_exact
 templates.env.filters["datetime"] = fmt_datetime
 templates.env.filters["relative"] = fmt_relative
 templates.env.filters["duration"] = fmt_duration
