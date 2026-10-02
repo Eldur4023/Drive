@@ -38,7 +38,14 @@ DesktopWindow::DesktopWindow(Options opts) {
 }
 
 DesktopWindow::~DesktopWindow() {
-    if (handle_) webview_destroy(static_cast<webview_t>(handle_));
+    if (!handle_) return;
+    auto w = static_cast<webview_t>(handle_);
+    // webview's GTK engine destructor is `= default`: it never destroys the
+    // window, so a closed window stayed on screen (and its WebKit connections
+    // kept the server's 30 s drain waiting) until the process exited.
+    gtk_widget_destroy(GTK_WIDGET(webview_get_window(w)));
+    while (gtk_events_pending()) gtk_main_iteration();
+    webview_destroy(w);
 }
 
 void DesktopWindow::run(const std::string& url) {

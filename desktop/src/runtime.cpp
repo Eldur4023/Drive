@@ -24,6 +24,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <thread>
@@ -375,24 +376,28 @@ int main(int argc, char** argv) {
     // not something to snap back to every time.
     load_saved_geometry(app_id, opts.width, opts.height);
 
-    DesktopWindow window(opts);
+    std::optional<DesktopWindow> window(std::in_place, opts);
     {
         std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = &window;
+        g_window = &*window;
     }
     install_window_control_hooks();
-    window.run("http://127.0.0.1:" + std::to_string(port) + "/");
-    save_geometry(app_id, window.last_width(), window.last_height());
+    window->run("http://127.0.0.1:" + std::to_string(port) + "/");
+    save_geometry(app_id, window->last_width(), window->last_height());
+
+    // Destroy the window before waiting on the server: the webview keeps its
+    // keep-alive connections open, and the server's drain waits up to 30 s
+    // for them -- the closed window stayed on screen all that time.
+    {
+        std::lock_guard<std::mutex> lk(g_window_mutex);
+        g_window = nullptr;
+    }
+    window.reset();
 
     // See the comment on g_shutdown_from_signal: only raise SIGTERM
     // ourselves if nothing already started the shutdown.
     if (!g_shutdown_from_signal.load()) std::raise(SIGTERM);
     server_thread.join();
-
-    {
-        std::lock_guard<std::mutex> lk(g_window_mutex);
-        g_window = nullptr;
-    }
 
     // work_dir es PERSISTENTE (XDG data home): contiene ./data/ con la base
     // de datos de la biblioteca. Borrarlo al apagar era del esquema antiguo

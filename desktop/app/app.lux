@@ -209,7 +209,9 @@ get endpoint("/api/update/log"):
 
 # Tras actualizar: abre la versión nueva y cierra esta.
 post endpoint("/api/restart"):
-    await os.run("setsid", ["-f", "sh", "-c", "sleep 1; exec /usr/local/bin/drive-sync"], { "timeout_ms": 5000 })
+    # Sin redirigir, la app nueva hereda nuestra salida y os.run espera hasta el
+    # timeout: lanza un error y window.close() no llega a ejecutarse.
+    await os.run("setsid", ["-f", "sh", "-c", "exec > /dev/null 2>&1 < /dev/null; sleep 1; exec /usr/local/bin/drive-sync"], { "timeout_ms": 5000 })
     window.close()
     return { "ok": true }
 
