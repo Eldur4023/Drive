@@ -90,6 +90,18 @@ wait_for '[ -f "$B/otro-nombre.txt" ] && [ ! -e "$B/renombrado.txt" ]' && ok "mo
 check "B lo movió en disco (mismo inodo, no se bajó de nuevo)" '[ "$(stat -c %i "$B/otro-nombre.txt")" = "$INO2" ]'
 check "A también" '[ -f "$A/otro-nombre.txt" ] && [ ! -e "$A/renombrado.txt" ]'
 
+echo "# 5c. renombrar una carpeta entera es una sola llamada"
+mkdir -p "$A/carp/sub"; for i in 1 2 3 4 5 6; do echo "contenido $i" > "$A/carp/f$i.txt"; done; echo prof > "$A/carp/sub/g.txt"
+wait_for '[ -f "$B/carp/sub/g.txt" ] && [ -f "$B/carp/f6.txt" ]' || bad "carp no llegó a B"
+sleep 8
+CID=$(nid carp); FID=$(nid carp/f3.txt); GID=$(nid carp/sub/g.txt)
+mv "$A/carp" "$A/carpeta-nueva"
+wait_for '[ -f "$B/carpeta-nueva/sub/g.txt" ] && [ ! -e "$B/carp" ]' && ok "renombrar la carpeta en A llegó a B" || bad "no llegó a B"
+check "la carpeta de Drive es la misma (un solo renombrado)" '[ "$(nid carpeta-nueva)" = "$CID" ]'
+check "sus ficheros no se resubieron" '[ "$(nid carpeta-nueva/f3.txt)" = "$FID" ] && [ "$(nid carpeta-nueva/sub/g.txt)" = "$GID" ]'
+check "no queda la ruta vieja en Drive" '! tree | grep -q "^carp/"'
+check "el servicio cuenta 1 movimiento, no 7" 'grep -q "↑0 ↓0 borrados 0 conflictos 0 movidos 1" "$W/daemon.log"'
+
 echo "# 6. salvaguarda: carpeta local vaciada de golpe"
 mkdir "$W/aparte"; mv "$A"/* "$W/aparte/" 2>/dev/null; mv "$A"/.drive-sync-trash "$W/aparte/" 2>/dev/null
 sleep 12

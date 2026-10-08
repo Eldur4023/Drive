@@ -163,7 +163,7 @@ fn bool detect_local_moves(Json c, string root, string rid, Json local, Json rem
     Dict<string, List<string>> gone = {}
     for string a in base.keys():
         Json S = base[a]
-        if S["is_dir"] or local.has(a) or not remote.has(a):
+        if S["is_dir"] or done.has(a) or local.has(a) or not remote.has(a):
             continue
         if str(remote[a]["hash"]) != str(S["hash"]) or str(S["hash"]) == "":
             continue
@@ -175,7 +175,7 @@ fn bool detect_local_moves(Json c, string root, string rid, Json local, Json rem
         return true
     for string b in local.keys():
         Json L = local[b]
-        if L["is_dir"] or base.has(b) or remote.has(b) or time.now() - int(L["mtime"]) < 2000:
+        if L["is_dir"] or done.has(b) or base.has(b) or remote.has(b) or time.now() - int(L["mtime"]) < 2000:
             continue
         string h = await file_hash(os.path_join(root, b))
         if h == "" or not gone.has(h) or len(gone[h]) == 0:
@@ -207,7 +207,7 @@ fn bool detect_remote_moves(Json c, string root, Json local, Json remote, Json b
             by_id[str(remote[b]["id"])] = b
     for string a in base.keys():
         Json S = base[a]
-        if S["is_dir"] or remote.has(a) or not local.has(a) or not by_id.has(str(S["remote_id"])):
+        if S["is_dir"] or done.has(a) or remote.has(a) or not local.has(a) or not by_id.has(str(S["remote_id"])):
             continue
         string b = by_id[str(S["remote_id"])]
         Json L = local[a]
@@ -222,6 +222,64 @@ fn bool detect_remote_moves(Json c, string root, Json local, Json remote, Json b
         done[a] = true
         done[b] = true
         c["moved"] = int(c["moved"]) + 1
+    return true
+
+# Carpeta renombrada o movida en local. Sin esto serían N movimientos de ficheros (uno por
+# llamada a Drive); aquí es una sola llamada. Se reconoce por la «firma» de su contenido:
+# mismas rutas relativas, tamaños y fechas (renombrar conserva la fecha de modificación).
+
+# Firma de lo que hay bajo `dir` en `entries` (local o base): ruta relativa + tamaño + fecha.
+fn string dir_signature(Json entries, string dir):
+    string prefix = dir + "/"
+    List<string> parts = []
+    for string p in entries.keys():
+        if not p.starts_with(prefix):
+            continue
+        string suffix = p.slice(len(dir), len(p))
+        if entries[p]["is_dir"]:
+            parts.add("d" + suffix)
+        else:
+            parts.add("f" + suffix + "|" + str(entries[p]["size"]) + "|" + str(entries[p]["mtime"]))
+    parts.sort()
+    string out = ""
+    for string part in parts:
+        out = out + part + "\n"
+    return out
+
+# Carpetas que estaban sincronizadas, ya no están en disco y siguen en Drive: ruta → firma.
+fn Json gone_dir_signatures(Json local, Json remote, Json base):
+    Dict<string, string> out = {}
+    for string a in base.keys():
+        if not base[a]["is_dir"] or local.has(a) or not remote.has(a):
+            continue
+        string sig = dir_signature(base, a)
+        if sig != "":
+            out[a] = sig
+    return out
+
+# ¿Es `b` (carpeta nueva en disco) una carpeta de Drive que se renombró o movió? Devuelve su ruta vieja o "".
+fn string match_moved_dir(string b, Json local, Json gone, Dict<string, bool> done):
+    if len(gone.keys()) == 0:
+        return ""
+    string sig = dir_signature(local, b)
+    if sig == "":
+        return ""
+    for string a in gone.keys():
+        if not done.has(a) and str(gone[a]) == sig:
+            return a
+    return ""
+
+# Reescribe en la base `a` y todo lo que cuelga de ella como `b`, y marca las rutas como resueltas.
+fn bool rebase_dir(int link_id, string a, string b, Json base, Dict<string, bool> done):
+    string prefix = a + "/"
+    await sqlite.exec("""
+        update entries set path = ? || substr(path, ?) where link_id = ?
+        and (path = ? or substr(path, 1, ?) = ?)
+        """, b, len(a) + 1, link_id, a, len(prefix), prefix)
+    for string p in base.keys():
+        if p == a or p.starts_with(prefix):
+            done[p] = true
+            done[b + p.slice(len(a), len(p))] = true
     return true
 
 # Decide y hace lo que toque con una ruta que no es carpeta.
@@ -349,7 +407,11 @@ fn Json sync_link(Json link):
     Dict<string, string> made = {}
     List<string> gone_local = []
     List<string> gone_remote = []
+    Dict<string, bool> done = {}
+    Json gone_dirs = gone_dir_signatures(local, remote, base)
     for string rel in dirs:
+        if done.has(rel):
+            continue
         try:
             Json L = local.get(rel, null)
             Json R = remote.get(rel, null)
@@ -364,6 +426,21 @@ fn Json sync_link(Json link):
                     string parent_id = rid
                     if parent != "" and parent != ".":
                         parent_id = made.get(parent, "")
+                    string old_path = ""
+                    if parent_id != "" or parent == "" or parent == ".":
+                        old_path = match_moved_dir(rel, local, gone_dirs, done)
+                    if old_path != "":
+                        # Renombrada o movida: una sola llamada, sus ficheros no se tocan.
+                        Json m = await remote_move(str(remote[old_path]["id"]), parent_id, os.path_basename(rel))
+                        if m["ok"]:
+                            made[rel] = str(remote[old_path]["id"])
+                            for string p in base.keys():
+                                if p.starts_with(old_path + "/") and base[p]["is_dir"]:
+                                    made[rel + p.slice(len(old_path), len(p))] = str(remote[p]["id"])
+                            await rebase_dir(lid, old_path, rel, base, done)
+                            c["moved"] = int(c["moved"]) + 1
+                            continue
+                        await fail(c, rel, str(m["error"]))
                     if parent_id != "" or parent == "" or parent == ".":
                         Json r = await remote_mkdir(parent_id, os.path_basename(rel))
                         if r["ok"]:
@@ -385,7 +462,6 @@ fn Json sync_link(Json link):
         catch e:
             await fail(c, rel, e.message)
 
-    Dict<string, bool> done = {}
     try:
         await detect_local_moves(c, root, rid, local, remote, base, made, done)
         await detect_remote_moves(c, root, local, remote, base, done)
@@ -403,6 +479,8 @@ fn Json sync_link(Json link):
     # Carpetas que desaparecieron de un lado: de hijos a padres y sólo si quedaron vacías.
     gone_remote.reverse()
     for string rel in gone_remote:
+        if done.has(rel):
+            continue
         # Borrada en Drive. Si en local aún hay cosas (nuevas), se conserva y se reanota.
         string full = os.path_join(root, rel)
         if os.is_dir(full) and len(os.list_dir(full)) == 0:
@@ -410,6 +488,8 @@ fn Json sync_link(Json link):
         await forget(lid, rel)
     gone_local.reverse()
     for string rel in gone_local:
+        if done.has(rel):
+            continue
         # Borrada en local. Si en Drive hay algo que no estaba en la base, se conserva.
         bool fresh = false
         for string other in remote.keys():

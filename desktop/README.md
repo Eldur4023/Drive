@@ -79,8 +79,9 @@ nuevo en el otro lado»:
 
 **Mover y renombrar no resuben nada.** Si un fichero desaparece de A y aparece uno
 nuevo con el mismo contenido (hash) en B, se mueve en Drive; si Drive lo movió (la web u
-otra máquina), se mueve en disco. Sólo se detectan los ficheros: una carpeta movida
-se recrea y sus ficheros se mueven dentro de ella.
+otra máquina), se mueve en disco. Una carpeta renombrada o movida en tu equipo se
+reconoce por su contenido (mismas rutas, tamaños y fechas) y es una sola llamada a Drive,
+venga con los ficheros que venga.
 
 **Nada se pierde sin rastro.** Un conflicto deja la copia perdedora junto al
 fichero como `informe (conflicto 2026-10-02 18-30).pdf`. Al sobrescribir, Drive
