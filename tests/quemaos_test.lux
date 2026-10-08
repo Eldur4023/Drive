@@ -1,0 +1,65 @@
+# Pruebas de la sonda de QuemaOS de Drive (deploy/quemaos) contra un Drive real.
+# Las lanza quemaos.sh en dos fases: con Drive activo ("activo:") y ya parado ("caido:").
+
+import test
+
+fn string url(string path):
+    return test.base_url() + path
+
+fn Json status_body():
+    return (await http.get(url("/quemaos/status")))["body"]
+
+test "activo: cumple el contrato":
+    await measure()
+    Json r = await http.get(url("/quemaos/status"))
+    test.eq(r["status"], 200)
+    Json b = r["body"]
+    test.eq(b["quemaos"], 1)
+    test.eq(b["id"], "drive")
+    test.eq(b["name"], "Drive")
+    test.eq(b["status"], "ok")
+    test.ok(len(str(b["message"])) > 3)
+    test.ok(b["metrics"].has("usuarios") and b["metrics"].has("archivos") and b["metrics"].has("disco_libre_pct"))
+    test.eq(b["metrics"]["servidor_activo"], 1)
+    test.eq((await http.get(url("/quemaos/status/")))["status"], 200)
+    test.eq((await http.get(url("/otra-cosa")))["status"], 404)
+
+test "activo: las métricas salen de la base de Drive":
+    await measure()
+    Json b = await status_body()
+    # quemaos.sh creó una cuenta y subió un fichero de 10 bytes.
+    test.eq(b["metrics"]["usuarios"], 1)
+    test.eq(b["metrics"]["archivos"], 1)
+    test.eq(b["metrics"]["bytes_guardados"], 10)
+    test.eq(b["metrics"]["en_papelera"], 0)
+    test.contains(b["message"], "1 usuarios · 1 archivos")
+
+test "activo: con datos guardados, perder el directorio de ficheros es un error":
+    string root = os.getenv("PROBE_STORAGE_ROOT", "")
+    await os.move(root, root + ".movido")
+    await measure()
+    Json b = await status_body()
+    await os.move(root + ".movido", root)
+    test.eq(b["status"], "error")
+    test.contains(b["message"], "directorio de ficheros")
+    await measure()
+    test.eq((await status_body())["status"], "ok")
+
+test "activo: medidas viejas avisan y luego dan error":
+    await measure()
+    Json d = state.get("probe", {})
+    d["at"] = time.now() - 100000
+    state.set("probe", d)
+    test.eq((await status_body())["status"], "warn")
+    d["at"] = time.now() - 400000
+    state.set("probe", d)
+    Json b = await status_body()
+    test.eq(b["status"], "error")
+    test.contains(b["message"], "reloj de medida")
+
+test "caido: si Drive no responde, error":
+    await measure()
+    Json b = await status_body()
+    test.eq(b["status"], "error")
+    test.contains(b["message"], "no responde")
+    test.eq(b["metrics"]["servidor_activo"], 0)

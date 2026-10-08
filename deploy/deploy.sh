@@ -16,6 +16,7 @@ SSH_PORT=22
 SSH_KEY=""
 REMOTE_STAGING="/tmp/drive-deploy"
 HEALTH_PORT=8000
+LUX_BIN=""           # binario de Lux de la sonda de QuemaOS (opcional)
 MODE="auto"          # auto | install | update
 ASSUME_YES=0
 DRY_RUN=0
@@ -36,6 +37,8 @@ Opciones:
       --health-port N   Puerto donde comprobar /healthz (8000)
       --install         Forzar instalación completa
       --update          Forzar actualización de código solamente
+      --lux-bin FICHERO Binario de Lux para la sonda de QuemaOS (app aparte; Drive es Python).
+                        Sin él no se instala ni se actualiza la sonda.
   -y, --yes             No pedir confirmación
   -n, --dry-run         Mostrar lo que se haría, sin tocar nada
   -h, --help            Esta ayuda
@@ -52,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --health-port)  HEALTH_PORT="$2"; shift 2 ;;
         --install)      MODE="install"; shift ;;
         --update)       MODE="update"; shift ;;
+        --lux-bin)      LUX_BIN="$2"; shift 2 ;;
         -y|--yes)       ASSUME_YES=1; shift ;;
         -n|--dry-run)   DRY_RUN=1; shift ;;
         -h|--help)      uso; exit 0 ;;
@@ -167,13 +171,18 @@ PAQUETE="$TMP_LOCAL/drive.tar.gz"
 
 echo
 gris "==> Empaquetando el proyecto"
+if [[ -n "$LUX_BIN" ]]; then
+    [[ -x "$LUX_BIN" ]] || { rojo "No se encuentra el binario de Lux (o no es ejecutable): $LUX_BIN"; exit 1; }
+    cp "$LUX_BIN" "$TMP_LOCAL/quemaos-lux"
+fi
 tar czf "$PAQUETE" \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
     --exclude='.venv' \
     --exclude='venv' \
     --exclude='data' \
-    app config deploy requirements.txt README.md
+    app config deploy requirements.txt README.md \
+    ${LUX_BIN:+-C "$TMP_LOCAL" quemaos-lux}
 gris "    $(du -h "$PAQUETE" | cut -f1)"
 
 gris "==> Enviando a $TARGET"
@@ -192,6 +201,13 @@ if [[ "$MODE" == "install" ]]; then
 else
     gris "==> Actualizando (puede pedirte la contraseña de sudo)"
     remoto_tty "cd '$REMOTE_STAGING' && sudo bash deploy/remote-update.sh $HEALTH_PORT"
+fi
+
+# La sonda de QuemaOS va aparte: si falla se avisa, pero Drive ya está desplegado y funcionando.
+if [[ -n "$LUX_BIN" ]]; then
+    echo
+    gris "==> Sonda de QuemaOS"
+    remoto_tty "cd '$REMOTE_STAGING' && sudo bash deploy/quemaos-install.sh quemaos-lux" || rojo "La sonda no se ha instalado (Drive sí). Mira el mensaje de arriba."
 fi
 
 remoto "rm -rf '$REMOTE_STAGING'"

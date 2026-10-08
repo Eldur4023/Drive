@@ -22,6 +22,7 @@ Docker obligatorio y sin dependencias externas más allá de Python.
 - [Recetas](#recetas)
 - [API](#api)
 - [Órdenes de administración](#órdenes-de-administración)
+- [Estado para QuemaOS](#estado-para-quemaos)
 - [Seguridad](#seguridad)
 - [Cómo está montado](#cómo-está-montado)
 - [Pruebas](#pruebas)
@@ -432,6 +433,21 @@ systemctl stop drive
 tar czf drive-$(date +%F).tar.gz /var/lib/drive
 systemctl start drive
 ```
+
+---
+
+## Estado para QuemaOS
+
+La sonda es una **app Lux aparte** ([deploy/quemaos/app.lux](deploy/quemaos/app.lux), servicio `drive-quemaos`): Drive es Python y
+una app Lux abre su propio puerto, del rango 9700-9799 de la suite (el 9704). Contesta `GET /quemaos/status` con
+`{quemaos, id, name, status: ok|warn|error, message, metrics, extra}` sin tocar la base ni el disco (sirve lo último que midió
+un reloj interno cada 30 s; si el reloj se para, lo delata). Da `error` si Drive no responde a `/healthz`, la base falla, falta
+el directorio de ficheros con datos guardados o queda casi sin disco. Sólo ejecuta `SELECT` sobre la base de Drive.
+
+Se instala con `deploy.sh --lux-bin FICHERO` (cualquier binario de Lux; se queda en `/opt/drive/lux`, no toca el del sistema)
+o con `sudo bash deploy/quemaos-install.sh FICHERO` en el servidor. Su puerto vive en **`/etc/drive/quemaos.env`**
+(`PROBE_PORT`), **no en `drive.env`**: Drive trata cualquier variable `DRIVE_*` como configuración y no arranca si no la conoce.
+Pruebas: `LUX=… PYTHON=… tests/quemaos.sh`.
 
 ---
 
