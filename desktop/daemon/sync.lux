@@ -17,6 +17,9 @@
 #   sí     sí      -      cambiaron los dos              conflicto: gana el más
 #                                                        reciente y el otro se guarda
 #
+# Antes de nada se detectan los movimientos y renombrados de ficheros (mismo contenido
+# o mismo id en otra ruta): se mueven en el otro lado en vez de subir/bajar el fichero.
+#
 # Nada se pierde sin rastro: Drive archiva la versión anterior al sobrescribir y
 # lo borrado va a su papelera; en local, a .drive-sync-trash/ dentro de la carpeta.
 
@@ -150,6 +153,77 @@ fn string conflict_name(string rel):
         return renamed
     return dir + "/" + renamed
 
+# Movimientos y renombrados. Sin esto, mover A→B se vería como «A desapareció» + «B es
+# nuevo» y se subiría o bajaría el fichero entero. Cada uno devuelve las rutas
+# resueltas (A y B) para que el bucle principal no las vuelva a tratar.
+
+# Movido en local: A ya no está en disco pero sigue igual en Drive, y hay un B nuevo con
+# el mismo contenido. Se mueve en Drive; el fichero no viaja.
+fn bool detect_local_moves(Json c, string root, string rid, Json local, Json remote, Json base, Dict<string, string> made, Dict<string, bool> done):
+    Dict<string, List<string>> gone = {}
+    for string a in base.keys():
+        Json S = base[a]
+        if S["is_dir"] or local.has(a) or not remote.has(a):
+            continue
+        if str(remote[a]["hash"]) != str(S["hash"]) or str(S["hash"]) == "":
+            continue
+        string key = str(S["hash"])
+        if not gone.has(key):
+            gone[key] = []
+        gone[key].add(a)
+    if len(gone.keys()) == 0:
+        return true
+    for string b in local.keys():
+        Json L = local[b]
+        if L["is_dir"] or base.has(b) or remote.has(b) or time.now() - int(L["mtime"]) < 2000:
+            continue
+        string h = await file_hash(os.path_join(root, b))
+        if h == "" or not gone.has(h) or len(gone[h]) == 0:
+            continue
+        string parent = os.path_dirname(b)
+        string parent_id = rid
+        if parent != "" and parent != ".":
+            parent_id = made.get(parent, "")
+            if parent_id == "":
+                continue
+        string a = gone[h].pop()
+        Json r = await remote_move(str(remote[a]["id"]), parent_id, os.path_basename(b))
+        if not r["ok"]:
+            await fail(c, b, str(r["error"]))
+            continue
+        await forget(int(c["link"]), a)
+        await remember(int(c["link"]), b, false, h, int(L["size"]), int(L["mtime"]), str(remote[a]["id"]))
+        done[a] = true
+        done[b] = true
+        c["moved"] = int(c["moved"]) + 1
+    return true
+
+# Movido en Drive (la web u otra máquina): el mismo id está ahora en otra ruta y en local
+# A sigue sin tocar. Se mueve en disco; no se baja nada.
+fn bool detect_remote_moves(Json c, string root, Json local, Json remote, Json base, Dict<string, bool> done):
+    Dict<string, string> by_id = {}
+    for string b in remote.keys():
+        if not remote[b]["is_dir"]:
+            by_id[str(remote[b]["id"])] = b
+    for string a in base.keys():
+        Json S = base[a]
+        if S["is_dir"] or remote.has(a) or not local.has(a) or not by_id.has(str(S["remote_id"])):
+            continue
+        string b = by_id[str(S["remote_id"])]
+        Json L = local[a]
+        # Sólo si A no cambió en disco desde la última pasada y B no existe aún.
+        if L["size"] != S["size"] or L["mtime"] != S["mtime"] or local.has(b) or base.has(b):
+            continue
+        string dest = os.path_join(root, b)
+        os.make_dir(os.path_dirname(dest))
+        await os.move(os.path_join(root, a), dest)
+        await forget(int(c["link"]), a)
+        await remember(int(c["link"]), b, false, str(S["hash"]), int(L["size"]), int(L["mtime"]), str(S["remote_id"]))
+        done[a] = true
+        done[b] = true
+        c["moved"] = int(c["moved"]) + 1
+    return true
+
 # Decide y hace lo que toque con una ruta que no es carpeta.
 fn bool sync_file(Json c, string root, string rid, string rel, Json L, Json R, Json S):
     string full = os.path_join(root, rel)
@@ -216,7 +290,7 @@ fn Json sync_link(Json link):
     int lid = int(link["id"])
     string root = str(link["local_path"])
     string rid = str(link["remote_id"])
-    Json c = { "link": lid, "up": 0, "down": 0, "del_local": 0, "del_remote": 0, "conflicts": 0, "errors": 0, "first_error": "", "offline": false }
+    Json c = { "link": lid, "up": 0, "down": 0, "del_local": 0, "del_remote": 0, "conflicts": 0, "moved": 0, "errors": 0, "first_error": "", "offline": false }
 
     Json tree = await remote_tree(rid)
     if not tree["ok"]:
@@ -311,7 +385,16 @@ fn Json sync_link(Json link):
         catch e:
             await fail(c, rel, e.message)
 
+    Dict<string, bool> done = {}
+    try:
+        await detect_local_moves(c, root, rid, local, remote, base, made, done)
+        await detect_remote_moves(c, root, local, remote, base, done)
+    catch e:
+        await fail(c, "movimientos", e.message)
+
     for string rel in files:
+        if done.has(rel):
+            continue
         try:
             await sync_file(c, root, rid, rel, local.get(rel, null), remote.get(rel, null), base.get(rel, null))
         catch e:
@@ -375,9 +458,9 @@ fn bool tick_link(Json link, int now, int poll):
     if int(c["errors"]) > 0:
         status = "con errores"
     await sqlite.exec("update links set status = ?, last_sync = ?, last_error = ?, force = 0 where id = ?", status, time.now(), c["first_error"], lid)
-    int work = int(c["up"]) + int(c["down"]) + int(c["del_local"]) + int(c["del_remote"]) + int(c["conflicts"])
+    int work = int(c["up"]) + int(c["down"]) + int(c["del_local"]) + int(c["del_remote"]) + int(c["conflicts"]) + int(c["moved"])
     if work > 0:
-        await note(lid, "info", root + ": ↑" + str(c["up"]) + " ↓" + str(c["down"]) + " borrados " + str(int(c["del_local"]) + int(c["del_remote"])) + " conflictos " + str(c["conflicts"]))
+        await note(lid, "info", root + ": ↑" + str(c["up"]) + " ↓" + str(c["down"]) + " borrados " + str(int(c["del_local"]) + int(c["del_remote"])) + " conflictos " + str(c["conflicts"]) + " movidos " + str(c["moved"]))
     return true
 
 fn bool tick():

@@ -70,6 +70,26 @@ wait_for 'ls "$A" | grep -q conflicto' && ok "se guardó una copia de conflicto"
 check "gana la edición más reciente (Drive)" 'grep -q "version drive" "$A/web.txt"'
 check "la copia conserva la edición local" 'grep -q "version local" "$A"/web*conflicto*'
 
+echo "# 5b. mover no vuelve a subir ni a bajar nada"
+nid() { drive "$DRIVE_URL/api/sync/tree?root_id=$RID" | python3 -c "import sys,json; print([i['id'] for i in json.load(sys.stdin)['items'] if i['path']=='$1'][0])"; }
+wait_for '[ -f "$A/bin.dat" ] && [ -f "$B/bin.dat" ] && [ -f "$B/sub/hondo/c.txt" ]' || bad "estado previo sin sincronizar"
+sleep 8
+ID1=$(nid bin.dat)
+mkdir "$A/movido"; mv "$A/bin.dat" "$A/movido/bin.dat"
+wait_for '[ -f "$B/movido/bin.dat" ] && [ ! -e "$B/bin.dat" ]' && ok "mover en A llegó a B" || bad "mover en A no llegó a B"
+check "en Drive es el mismo fichero (no se resubió)" '[ "$(nid movido/bin.dat)" = "$ID1" ]'
+check "ya no está en la ruta vieja de Drive" '! tree | grep -qx bin.dat'
+INO=$(stat -c %i "$B/movido/bin.dat")
+echo "otro" > "$A/renombrame.txt"; wait_for '[ -f "$B/renombrame.txt" ]' || bad "no llegó renombrame.txt"
+ID2=$(nid renombrame.txt); sleep 3; mv "$A/renombrame.txt" "$A/renombrado.txt"
+wait_for '[ -f "$B/renombrado.txt" ] && [ ! -e "$B/renombrame.txt" ]' && ok "renombrar en A llegó a B" || bad "renombrar no llegó"
+check "renombrar conserva el fichero en Drive" '[ "$(nid renombrado.txt)" = "$ID2" ]'
+INO2=$(stat -c %i "$B/renombrado.txt")
+drive -X PATCH -d "name=otro-nombre.txt" "$DRIVE_URL/api/files/$ID2" >/dev/null
+wait_for '[ -f "$B/otro-nombre.txt" ] && [ ! -e "$B/renombrado.txt" ]' && ok "mover en Drive llegó a B" || bad "mover en Drive no llegó a B"
+check "B lo movió en disco (mismo inodo, no se bajó de nuevo)" '[ "$(stat -c %i "$B/otro-nombre.txt")" = "$INO2" ]'
+check "A también" '[ -f "$A/otro-nombre.txt" ] && [ ! -e "$A/renombrado.txt" ]'
+
 echo "# 6. salvaguarda: carpeta local vaciada de golpe"
 mkdir "$W/aparte"; mv "$A"/* "$W/aparte/" 2>/dev/null; mv "$A"/.drive-sync-trash "$W/aparte/" 2>/dev/null
 sleep 12

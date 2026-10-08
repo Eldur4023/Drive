@@ -77,6 +77,11 @@ nuevo en el otro lado»:
 | sí | sí | sí | cambió uno | sube o baja |
 | sí | sí | – | **cambiaron los dos** | gana la edición más reciente; la otra se conserva |
 
+**Mover y renombrar no resuben nada.** Si un fichero desaparece de A y aparece uno
+nuevo con el mismo contenido (hash) en B, se mueve en Drive; si Drive lo movió (la web u
+otra máquina), se mueve en disco. Sólo se detectan los ficheros: una carpeta movida
+se recrea y sus ficheros se mueven dentro de ella.
+
 **Nada se pierde sin rastro.** Un conflicto deja la copia perdedora junto al
 fichero como `informe (conflicto 2026-10-02 18-30).pdf`. Al sobrescribir, Drive
 archiva la versión anterior. Lo borrado va a la papelera de Drive o a
@@ -92,8 +97,6 @@ terminar: nunca queda un fichero a medias.
 
 ## Límites conocidos
 
-- **Renombrar o mover es «borrar + crear»**: se vuelve a subir. Detectarlo por
-  hash evitaría la subida.
 - **Sondeo, no inotify**: un cambio local tarda hasta 5 s (más los 2 s de
   margen) en subirse, y uno de Drive hasta 60 s en bajar (`poll_seconds`). Con
   cientos de miles de ficheros convendría un módulo nativo de inotify.
