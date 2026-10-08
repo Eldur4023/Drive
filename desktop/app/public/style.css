@@ -23,7 +23,7 @@ body { margin:0; background:var(--bg) ; background-image:var(--glow); background
 .brand { display:flex; align-items:center; gap:11px; font-size:17px; letter-spacing:-.01em; }
 .logo { width:34px; height:34px; border-radius:11px; display:grid; place-items:center; background:var(--grad); color:#fff;
   box-shadow:0 6px 16px -4px color-mix(in srgb,var(--accent) 60%,transparent); }
-.logo .ico { width:19px; height:19px; stroke-width:2; }
+.logo .ico { width:19px; height:19px; stroke-width:2; fill:#fff; }
 .conn { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13.5px; }
 .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); }
 .dot.on { background:#22c55e; box-shadow:0 0 0 4px color-mix(in srgb,#22c55e 22%,transparent); }

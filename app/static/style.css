@@ -93,7 +93,7 @@ a:hover { text-decoration: underline; text-underline-offset: 3px; }
   background: var(--grad); color: #fff;
   box-shadow: 0 6px 16px -4px color-mix(in srgb, var(--accent) 60%, transparent);
 }
-.logo .ico { width: 19px; height: 19px; stroke-width: 2; }
+.logo .ico { width: 19px; height: 19px; stroke-width: 2; fill: #fff; }
 
 .sidebar nav { display: flex; flex-direction: column; gap: 3px; }
 .nav-item {
