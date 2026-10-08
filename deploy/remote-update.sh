@@ -151,6 +151,10 @@ fi
 
 trap - ERR
 
+# Dónde escucha Drive: con BIND_HOST concreto (p. ej. la IP de Tailscale) el 127.0.0.1 no responde.
+CHK_HOST="${BIND_HOST:-127.0.0.1}"
+[[ "$CHK_HOST" == "0.0.0.0" ]] && CHK_HOST=127.0.0.1
+
 if command -v curl >/dev/null 2>&1; then
     # Si hay certificado configurado, el servicio habla HTTPS. Se valida con -k
     # porque un certificado autofirmado o emitido para el dominio público no
@@ -162,10 +166,10 @@ if command -v curl >/dev/null 2>&1; then
         EXTRA=(-k)
     fi
 
-    if curl -fsS "${EXTRA[@]}" --max-time 5 "$ESQUEMA://127.0.0.1:$HEALTH_PORT/healthz" >/dev/null 2>&1; then
-        echo "==> /healthz responde en $ESQUEMA://127.0.0.1:$HEALTH_PORT"
+    if curl -fsS "${EXTRA[@]}" --max-time 5 "$ESQUEMA://$CHK_HOST:$HEALTH_PORT/healthz" >/dev/null 2>&1; then
+        echo "==> /healthz responde en $ESQUEMA://$CHK_HOST:$HEALTH_PORT"
     else
-        echo "    Aviso: /healthz no responde en $ESQUEMA://127.0.0.1:$HEALTH_PORT."
+        echo "    Aviso: /healthz no responde en $ESQUEMA://$CHK_HOST:$HEALTH_PORT."
         echo "    El servicio está activo; comprueba BIND_PORT en $ENV_FILE."
     fi
 fi

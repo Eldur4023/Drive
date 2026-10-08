@@ -36,7 +36,9 @@ SCHEME=http
 [[ -n "${TLS_CERT:-}" ]] && SCHEME=https
 export PROBE_DB="$DB"
 export PROBE_STORAGE_ROOT="${DRIVE_STORAGE__ROOT:-}"
-export PROBE_URL="$SCHEME://127.0.0.1:${BIND_PORT:-8000}"
+# Drive puede escuchar sólo en la IP de Tailscale (BIND_HOST): el /healthz se comprueba donde escucha.
+CHK="${BIND_HOST:-127.0.0.1}"; [[ "$CHK" == "0.0.0.0" ]] && CHK=127.0.0.1
+export PROBE_URL="$SCHEME://$CHK:${BIND_PORT:-8000}"
 export PROBE_PORT="$PORT"
 
 echo "Sonda de QuemaOS en http://${PROBE_HOST:-127.0.0.1}:$PORT/quemaos/status (base: $DB)"
