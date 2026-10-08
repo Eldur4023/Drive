@@ -14,6 +14,8 @@ LUX="${LUX:-lux}"
 PY="${PYTHON:-$( [ -x "$ROOT/venv/bin/python" ] && echo "$ROOT/venv/bin/python" || echo python3 )}"
 PORT="${DRIVE_TEST_PORT:-8195}"
 TMP="$(mktemp -d)"
+# Contraseña de la cuenta de prueba: aleatoria en cada ejecución (ninguna escrita en el repositorio).
+PW="Aa1-$(openssl rand -hex 8)"
 PID=""
 cleanup() { [ -n "$PID" ] && kill "$PID" 2>/dev/null; wait 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -25,14 +27,14 @@ export DRIVE_DATABASE__URL="sqlite:///$TMP/drive.db" DRIVE_STORAGE__ROOT="$TMP/b
 export PROBE_DB="$TMP/drive.db" PROBE_STORAGE_ROOT="$TMP/blobs" PROBE_URL="http://127.0.0.1:$PORT"
 cd "$ROOT"
 "$PY" -m app.cli init >/dev/null 2>&1 || { echo "no se pudo inicializar Drive con $PY"; exit 1; }
-"$PY" -m app.cli createuser ana --role user --password 'Clave-De-Prueba-1' >/dev/null 2>&1 || { echo "no se pudo crear la cuenta"; exit 1; }
+"$PY" -m app.cli createuser ana --role user --password "$PW" >/dev/null 2>&1 || { echo "no se pudo crear la cuenta"; exit 1; }
 "$PY" -m uvicorn app.main:app --host 127.0.0.1 --port "$PORT" >"$TMP/drive.log" 2>&1 &
 PID=$!
 for _ in $(seq 1 75); do curl -fs "$PROBE_URL/healthz" >/dev/null 2>&1 && break; sleep 0.2; done
 curl -fs "$PROBE_URL/healthz" >/dev/null || { echo "Drive no arranca"; tail -20 "$TMP/drive.log"; exit 1; }
 
 # Una cuenta y un fichero de 10 bytes, por el camino normal (sesión + API).
-curl -s -c "$TMP/jar" -o /dev/null -d 'username=ana&password=Clave-De-Prueba-1&next=/' "$PROBE_URL/login"
+curl -s -c "$TMP/jar" -o /dev/null -d "username=ana&password=$PW&next=/" "$PROBE_URL/login"
 printf '0123456789' > "$TMP/a.txt"
 curl -s -b "$TMP/jar" -o /dev/null -w '%{http_code}' -F "file=@$TMP/a.txt" "$PROBE_URL/api/files" | grep -q 201 || { echo "no se pudo subir el fichero de prueba"; exit 1; }
 
