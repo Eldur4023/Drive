@@ -167,6 +167,18 @@ def test_no_se_puede_mover_una_carpeta_dentro_de_si_misma(client):
     assert response.status_code == 400
 
 
+def test_mover_conserva_el_nombre(client):
+    """Antes se chocaba consigo mismo y quedaba «docs (2)»."""
+    register(client, "ana")
+    login(client, "ana")
+    destino = client.post("/api/folders", data={"name": "destino"}).json()
+    carpeta = client.post("/api/folders", data={"name": "docs"}).json()
+
+    response = client.patch(f"/api/files/{carpeta['id']}", data={"parent_id": destino["id"]})
+    assert response.status_code == 200
+    assert response.json()["name"] == "docs"
+
+
 def test_nombre_con_separadores_se_sanea(client):
     register(client, "ana")
     login(client, "ana")

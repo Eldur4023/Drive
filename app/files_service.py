@@ -224,19 +224,25 @@ _SUFFIX_RE = re.compile(r"^(?P<stem>.*?)(?: \((?P<n>\d+)\))?$")
 
 
 def unique_name(
-    db: DbSession, owner_id: str, parent_id: str | None, name: str
+    db: DbSession,
+    owner_id: str,
+    parent_id: str | None,
+    name: str,
+    exclude_id: str | None = None,
 ) -> str:
-    """Devuelve ``name`` o ``name (2)`` si ya existe un hermano vivo igual."""
-    taken = {
-        n.name
-        for n in db.scalars(
-            select(Node).where(
-                Node.owner_id == owner_id,
-                Node.parent_id == parent_id,
-                Node.deleted_at.is_(None),
-            )
-        )
-    }
+    """Devuelve ``name`` o ``name (2)`` si ya existe un hermano vivo igual.
+
+    ``exclude_id`` es el nodo que se renombra o mueve: no cuenta como hermano de
+    sí mismo (si no, al moverlo se choca con su propia fila ya reubicada).
+    """
+    query = select(Node).where(
+        Node.owner_id == owner_id,
+        Node.parent_id == parent_id,
+        Node.deleted_at.is_(None),
+    )
+    if exclude_id is not None:
+        query = query.where(Node.id != exclude_id)
+    taken = {n.name for n in db.scalars(query)}
     if name not in taken:
         return name
 
@@ -438,7 +444,7 @@ def rename(db: DbSession, node: Node, new_name: str) -> Node:
     name = storage.sanitize_name(new_name)
     if not node.is_dir:
         storage.check_filename(name)
-    node.name = unique_name(db, node.owner_id, node.parent_id, name)
+    node.name = unique_name(db, node.owner_id, node.parent_id, name, node.id)
     node.updated_at = utcnow()
     db.flush()
     return node
@@ -460,7 +466,7 @@ def move(db: DbSession, node: Node, new_parent: Node | None) -> Node:
             cursor = db.get(Node, cursor.parent_id) if cursor.parent_id else None
 
     node.parent_id = new_parent.id if new_parent else None
-    node.name = unique_name(db, node.owner_id, node.parent_id, node.name)
+    node.name = unique_name(db, node.owner_id, node.parent_id, node.name, node.id)
     node.updated_at = utcnow()
     db.flush()
     return node
@@ -541,7 +547,7 @@ def restore(db: DbSession, node: Node, config: Config | None = None) -> Node:
         parent = None
 
     node.parent_id = parent.id if parent else None
-    node.name = unique_name(db, node.owner_id, node.parent_id, node.name)
+    node.name = unique_name(db, node.owner_id, node.parent_id, node.name, node.id)
     node.deleted_at = None
     node.trashed_from_id = None
     for child in descendants(db, node):
