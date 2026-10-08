@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import maintenance, quemaos, settings_store
+from . import maintenance, settings_store
 from .config import get_config
 from .database import init_db, session_scope
 from .templating import render
@@ -59,13 +59,8 @@ async def lifespan(app: FastAPI):
     if config.maintenance.enabled:
         thread, stop = maintenance.start()
 
-    probe = quemaos.start(config)
-
     log.info("%s listo en %s", config.app.name, config.app.base_url)
     yield
-
-    if probe is not None:
-        probe.stop()
 
     if stop is not None:
         stop.set()

@@ -315,23 +315,6 @@ class MaintenanceConfig(_Base):
     purge_orphan_blobs: bool = True
 
 
-class QuemaosConfig(_Base):
-    """Sonda de estado para QuemaOS: un listener aparte, fuera del puerto de la API."""
-
-    enabled: bool = True
-    # Sólo el bucle local por defecto; ponlo en 0.0.0.0 si QuemaOS la consulta desde otra máquina.
-    host: str = "127.0.0.1"
-    # Rango reservado de la suite: 9700-9799 (ver Suite-Canon.md). Drive usa el 9701.
-    port: int = 9701
-
-    @field_validator("port")
-    @classmethod
-    def _port_in_range(cls, value: int) -> int:
-        if not 9700 <= value <= 9799:
-            raise ValueError("quemaos.port debe estar entre 9700 y 9799")
-        return value
-
-
 # --------------------------------------------------------------------------- #
 # Raíz
 # --------------------------------------------------------------------------- #
@@ -367,7 +350,6 @@ class Config(_Base):
     audit: AuditConfig = AuditConfig()
     ui: UiConfig = UiConfig()
     maintenance: MaintenanceConfig = MaintenanceConfig()
-    quemaos: QuemaosConfig = QuemaosConfig()
 
     # Redes ya parseadas, cacheadas para no re-parsear en cada petición.
     _networks: dict[str, list[Any]] = PrivateAttr(default_factory=dict)

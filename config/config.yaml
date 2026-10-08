@@ -323,13 +323,3 @@ maintenance:
   purge_sessions: true
   purge_audit: true
   purge_orphan_blobs: true
-
-# -----------------------------------------------------------------------------
-# QuemaOS — sonda de estado
-# -----------------------------------------------------------------------------
-# Un pequeño servidor HTTP propio (no el de la API) con GET /quemaos/status, para que
-# la app QuemaOS vea el estado de Drive. Puerto del rango 9700-9799 de la suite.
-quemaos:
-  enabled: true
-  host: "127.0.0.1"   # "0.0.0.0" si QuemaOS está en otra máquina
-  port: 9701
