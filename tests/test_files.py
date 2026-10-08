@@ -267,3 +267,29 @@ def test_resubir_el_mismo_contenido_no_cobra_ni_versiona(client):
             files={"file": ("doc.txt", b"x" * 300, "text/plain")},
         )
     assert client.get("/api/usage").json()["used"] == 300
+
+
+def test_una_carpeta_cambia_cuando_cambia_lo_que_hay_dentro(client):
+    """Su «modificado» debe moverse al añadir, renombrar, mover, sobrescribir o borrar un hijo."""
+    register(client, "ana")
+    login(client, "ana")
+    carpeta = client.post("/api/folders", data={"name": "docs"}).json()["id"]
+    otra = client.post("/api/folders", data={"name": "otra"}).json()["id"]
+
+    def modificado(node_id):
+        return client.get(f"/api/files/{node_id}").json()["updated_at"]
+
+    def cambia(accion, quien=carpeta):
+        antes = modificado(quien)
+        accion()
+        despues = modificado(quien)
+        assert despues > antes, (antes, despues)
+
+    cambia(lambda: upload(client, "a.txt", b"uno", parent=carpeta))
+    nodo = client.get(f"/api/files/{carpeta}").json()["children"][0]["id"]
+    cambia(lambda: client.patch(f"/api/files/{nodo}", data={"name": "b.txt"}))
+    cambia(lambda: client.post("/api/files", data={"parent_id": carpeta, "overwrite": "true"},
+                               files={"file": ("b.txt", b"dos", "text/plain")}))
+    cambia(lambda: client.patch(f"/api/files/{nodo}", data={"parent_id": otra}), quien=otra)
+    cambia(lambda: client.delete(f"/api/files/{nodo}"), quien=otra)
+    cambia(lambda: client.post(f"/api/files/{nodo}/restore"), quien=otra)

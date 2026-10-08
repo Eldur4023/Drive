@@ -24,7 +24,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import event, inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Session as OrmSession
 
 
 def utcnow() -> datetime:
@@ -361,3 +363,35 @@ class SettingOverride(Base):
     value: Mapped[dict] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     updated_by: Mapped[str | None] = mapped_column(String(32))
+
+
+# Una carpeta cambia cuando cambia lo que hay dentro: al añadir, mover, renombrar,
+# borrar, restaurar o sobrescribir un hijo se actualiza la fecha de su carpeta (la de
+# antes y la de después si se movió). Está aquí, en el flush, y no en cada operación,
+# para que ninguna vía (web, API, sincronización, copiar, restaurar) se la salte.
+_CHILD_CHANGES = ("parent_id", "name", "deleted_at", "blob_hash")
+
+
+@event.listens_for(OrmSession, "before_flush")
+def _touch_parent_folders(session: OrmSession, flush_context, instances) -> None:
+    parents: set[str] = set()
+    for obj in session.new:
+        if isinstance(obj, Node) and obj.parent_id:
+            parents.add(obj.parent_id)
+    for obj in session.deleted:
+        if isinstance(obj, Node) and obj.parent_id:
+            parents.add(obj.parent_id)
+    for obj in session.dirty:
+        if not isinstance(obj, Node):
+            continue
+        attrs = inspect(obj).attrs
+        if not any(attrs[name].history.has_changes() for name in _CHILD_CHANGES):
+            continue
+        parents.update(old for old in attrs.parent_id.history.deleted if old)  # carpeta de la que sale
+        if obj.parent_id:
+            parents.add(obj.parent_id)
+    now = utcnow()
+    for parent_id in parents:
+        parent = session.get(Node, parent_id)
+        if parent is not None and parent.is_dir:
+            parent.updated_at = now
