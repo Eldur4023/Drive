@@ -22,6 +22,7 @@ Docker obligatorio y sin dependencias externas más allá de Python.
 - [Recetas](#recetas)
 - [API](#api)
 - [Órdenes de administración](#órdenes-de-administración)
+- [Estado para QuemaOS](#estado-para-quemaos)
 - [Seguridad](#seguridad)
 - [Cómo está montado](#cómo-está-montado)
 - [Pruebas](#pruebas)
@@ -432,6 +433,16 @@ systemctl stop drive
 tar czf drive-$(date +%F).tar.gz /var/lib/drive
 systemctl start drive
 ```
+
+---
+
+## Estado para QuemaOS
+
+Drive abre un pequeño servidor HTTP propio, aparte del de la API, en `127.0.0.1:9701` (rango 9700-9799 de la
+suite) con `GET /quemaos/status`: `{quemaos, id, name, status: ok|warn|error, message, metrics, extra}`.
+No toca la base de datos ni el disco al responder (contesta con lo último que midió un hilo aparte, cada 30 s) y
+se configura en la sección `quemaos:` de `config.yaml` (`enabled`, `host`, `port`). Con varios workers sólo el
+primero la sirve. Código: [app/quemaos.py](app/quemaos.py).
 
 ---
 

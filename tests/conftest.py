@@ -21,6 +21,8 @@ BASE_CONFIG = {
     "auth": {"registration_enabled": True, "require_admin_approval": False},
     "rate_limit": {"enabled": False},
     "maintenance": {"enabled": False},
+    # Las pruebas no abren el puerto 9701; la sonda se prueba aparte (test_quemaos.py).
+    "quemaos": {"enabled": False},
     "network": {"trusted_networks": [], "trusted_mode": "none"},
     "server": {"behind_proxy": False},
     "audit": {"enabled": True},
