@@ -102,6 +102,17 @@ check "sus ficheros no se resubieron" '[ "$(nid carpeta-nueva/f3.txt)" = "$FID" 
 check "no queda la ruta vieja en Drive" '! tree | grep -q "^carp/"'
 check "el servicio cuenta 1 movimiento, no 7" 'grep -q "↑0 ↓0 borrados 0 conflictos 0 movidos 1" "$W/daemon.log"'
 
+echo "# 5d. muchas operaciones a la vez (carpetas anidadas, mover y borrar) van en lote"
+mkdir -p "$A/lote/x/y" "$A/lote/z"; for i in $(seq 25); do echo "n$i" > "$A/lote/x/y/f$i.txt"; done; echo zz > "$A/lote/z/z.txt"
+wait_for '[ -f "$B/lote/x/y/f25.txt" ] && [ -f "$B/lote/z/z.txt" ]' && ok "carpetas anidadas con 26 ficheros llegaron a B" || bad "lote no llegó a B"
+check "sin carpetas duplicadas en Drive" '! tree | grep -q "(2)"'
+sleep 8
+mkdir "$A/lote/destino"; for i in $(seq 25); do mv "$A/lote/x/y/f$i.txt" "$A/lote/destino/f$i.txt"; done
+wait_for '[ -f "$B/lote/destino/f25.txt" ] && [ ! -e "$B/lote/x/y/f1.txt" ]' && ok "25 movimientos de ficheros llegaron a B" || bad "movimientos no llegaron"
+rm -r "$A/lote/destino" "$A/lote/z"
+wait_for '[ ! -e "$B/lote/destino" ] && [ ! -e "$B/lote/z" ]' && ok "el borrado de 2 carpetas llegó a B" || bad "borrado no llegó a B"
+check "en Drive no queda nada de lo borrado" '! tree | grep -q -E "^lote/(destino|z)/"'
+
 echo "# 6. salvaguarda: carpeta local vaciada de golpe"
 mkdir "$W/aparte"; mv "$A"/* "$W/aparte/" 2>/dev/null; mv "$A"/.drive-sync-trash "$W/aparte/" 2>/dev/null
 sleep 12

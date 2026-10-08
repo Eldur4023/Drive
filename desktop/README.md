@@ -83,6 +83,12 @@ otra máquina), se mueve en disco. Una carpeta renombrada o movida en tu equipo 
 reconoce por su contenido (mismas rutas, tamaños y fechas) y es una sola llamada a Drive,
 venga con los ficheros que venga.
 
+**El contenido viaja; lo demás son operaciones.** Sólo los ficheros nuevos o cambiados
+se suben o se bajan, uno por llamada. Crear carpetas, mover, renombrar y borrar se
+acumulan durante la pasada y se mandan juntos a `POST /api/sync/ops`: el servidor los
+reproduce de una vez, en una transacción, y los anota en su auditoría. Una pasada con
+cientos de cambios de estructura son unas pocas peticiones, no cientos.
+
 **Nada se pierde sin rastro.** Un conflicto deja la copia perdedora junto al
 fichero como `informe (conflicto 2026-10-02 18-30).pdf`. Al sobrescribir, Drive
 archiva la versión anterior. Lo borrado va a la papelera de Drive o a
@@ -130,8 +136,9 @@ Ajustes por entorno (en la unidad): `DRIVE_SYNC_PORT`, `DRIVE_SYNC_HOME`,
 
 ## Servidor
 
-Usa la API de Drive (`/api/files`, `/api/folders`) más un endpoint añadido para
-esto: `GET /api/sync/tree?root_id=…`, que devuelve todo lo que hay bajo una
+Usa la API de Drive (`/api/files` para el contenido) más dos endpoints añadidos para
+esto. `POST /api/sync/ops` aplica por lotes las operaciones de estructura (ver el README
+principal). `GET /api/sync/tree?root_id=…` que devuelve todo lo que hay bajo una
 carpeta —plano, con rutas relativas, tamaño, hash sha256 y fecha— para comparar
 de una vez en lugar de recorrerla carpeta a carpeta. Lo borrado (en la papelera)
 no aparece, de modo que «ausente» significa «borrado». Las subidas con carpetas

@@ -286,6 +286,8 @@ class AuditConfig(_Base):
         "upload",
         "download",
         "delete",
+        "move",
+        "mkdir",
         "share_create",
         "share_access",
         "user_create",

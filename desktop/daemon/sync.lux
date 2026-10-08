@@ -100,6 +100,85 @@ fn bool fail(Json c, string rel, string message):
     await note(int(c["link"]), "error", rel + ": " + message)
     return false
 
+# ---- operaciones por lotes ---------------------------------------------------
+#
+# Todo lo que no es contenido (crear carpetas, mover, renombrar, borrar) se acumula en una
+# cola y se manda junta a /api/sync/ops: el servidor la reproduce sin que viaje ningún
+# fichero, deja el rastro en su auditoría y cada operación es idempotente. Sólo las
+# subidas y las bajadas de contenido son llamadas por fichero.
+
+fn bool enqueue(List<Json> q, Json op, Json meta):
+    op["key"] = str(len(q)) + ":" + str(meta["rel"])
+    q.add({ "op": op, "meta": meta })
+    return true
+
+# Reescribe en la base `a` y todo lo que cuelga de ella como `b`.
+fn bool rebase_entries(int link_id, string a, string b):
+    string prefix = a + "/"
+    await sqlite.exec("""
+        update entries set path = ? || substr(path, ?) where link_id = ?
+        and (path = ? or substr(path, 1, ?) = ?)
+        """, b, len(a) + 1, link_id, a, len(prefix), prefix)
+    return true
+
+# Manda un trozo de la cola y aplica a la base lo que el servidor confirmó.
+fn bool apply_chunk(Json c, List<Json> items, Dict<string, string> made):
+    List<Json> ops = []
+    for Json item in items:
+        Json op = item["op"]
+        # Una carpeta creada en un trozo anterior ya tiene id: se sustituye su referencia.
+        string pv = str(op.get("parent", ""))
+        if pv.starts_with("$") and made.has(pv.slice(1, len(pv))):
+            op["parent"] = made[pv.slice(1, len(pv))]
+        ops.add(op)
+    Json r = await remote_ops(ops, str(c["run"]))
+    if not r["ok"]:
+        await fail(c, "operaciones", str(r["error"]))
+        return false
+    Dict<string, Json> by_key = {}
+    List<Json> results = r["body"]["results"]
+    for Json res in results:
+        by_key[str(res["key"])] = res
+    int lid = int(c["link"])
+    for Json item in items:
+        Json m = item["meta"]
+        string rel = str(m["rel"])
+        Json res = by_key.get(str(item["op"]["key"]), null)
+        if res == null:
+            await fail(c, rel, "el servidor no respondió a esta operación")
+            continue
+        if not res["ok"]:
+            await fail(c, rel, str(res["error"]))
+            continue
+        string kind = str(m["kind"])
+        if kind == "mkdir":
+            made[rel] = str(res["id"])
+            await remember(lid, rel, true, "", 0, 0, str(res["id"]))
+        else if kind == "movedir":
+            await rebase_entries(lid, str(m["from"]), rel)
+            c["moved"] = int(c["moved"]) + 1
+        else if kind == "movefile":
+            await forget(lid, str(m["from"]))
+            await remember(lid, rel, false, str(m["hash"]), int(m["size"]), int(m["mtime"]), str(res["id"]))
+            c["moved"] = int(c["moved"]) + 1
+        else if kind == "trash":
+            await forget(lid, rel)
+            c["del_remote"] = int(c["del_remote"]) + 1
+    return true
+
+# Envía toda la cola, en trozos, y la deja vacía.
+fn bool flush_ops(Json c, List<Json> q, Dict<string, string> made):
+    List<Json> chunk = []
+    for Json item in q:
+        chunk.add(item)
+        # El servidor acepta hasta 1000 por petición.
+        if len(chunk) >= 500:
+            await apply_chunk(c, chunk, made)
+            chunk = []
+    if len(chunk) > 0:
+        await apply_chunk(c, chunk, made)
+    return true
+
 # Local → Drive. `overwrite` si ya existe allí (Drive archiva la versión anterior).
 fn bool push(Json c, string root, string rid, string rel, Json local_entry, string content_hash, bool overwrite):
     Json r = await remote_upload(rid, rel, os.path_join(root, rel), overwrite)
@@ -133,14 +212,6 @@ fn bool trash_local(Json c, string root, string rel):
     c["del_local"] = int(c["del_local"]) + 1
     return true
 
-fn bool trash_remote(Json c, string rel, string remote_id):
-    Json r = await remote_trash(remote_id)
-    if not r["ok"]:
-        return await fail(c, rel, str(r["error"]))
-    await forget(int(c["link"]), rel)
-    c["del_remote"] = int(c["del_remote"]) + 1
-    return true
-
 # «informe.pdf» → «informe (conflicto 2026-10-02 18-30).pdf», en la misma carpeta.
 fn string conflict_name(string rel):
     string dir = os.path_dirname(rel)
@@ -159,7 +230,7 @@ fn string conflict_name(string rel):
 
 # Movido en local: A ya no está en disco pero sigue igual en Drive, y hay un B nuevo con
 # el mismo contenido. Se mueve en Drive; el fichero no viaja.
-fn bool detect_local_moves(Json c, string root, string rid, Json local, Json remote, Json base, Dict<string, string> made, Dict<string, bool> done):
+fn bool detect_local_moves(List<Json> q, string root, string rid, Json local, Json remote, Json base, Dict<string, string> made, Dict<string, bool> done):
     Dict<string, List<string>> gone = {}
     for string a in base.keys():
         Json S = base[a]
@@ -187,15 +258,10 @@ fn bool detect_local_moves(Json c, string root, string rid, Json local, Json rem
             if parent_id == "":
                 continue
         string a = gone[h].pop()
-        Json r = await remote_move(str(remote[a]["id"]), parent_id, os.path_basename(b))
-        if not r["ok"]:
-            await fail(c, b, str(r["error"]))
-            continue
-        await forget(int(c["link"]), a)
-        await remember(int(c["link"]), b, false, h, int(L["size"]), int(L["mtime"]), str(remote[a]["id"]))
+        await enqueue(q, { "op": "move", "id": str(remote[a]["id"]), "parent": parent_id, "name": os.path_basename(b) },
+            { "kind": "movefile", "rel": b, "from": a, "hash": h, "size": int(L["size"]), "mtime": int(L["mtime"]) })
         done[a] = true
         done[b] = true
-        c["moved"] = int(c["moved"]) + 1
     return true
 
 # Movido en Drive (la web u otra máquina): el mismo id está ahora en otra ruta y en local
@@ -269,13 +335,9 @@ fn string match_moved_dir(string b, Json local, Json gone, Dict<string, bool> do
             return a
     return ""
 
-# Reescribe en la base `a` y todo lo que cuelga de ella como `b`, y marca las rutas como resueltas.
-fn bool rebase_dir(int link_id, string a, string b, Json base, Dict<string, bool> done):
+# Marca como resueltas `a` y todo lo que cuelga de ella, y sus rutas nuevas bajo `b`.
+fn bool mark_moved(string a, string b, Json base, Dict<string, bool> done):
     string prefix = a + "/"
-    await sqlite.exec("""
-        update entries set path = ? || substr(path, ?) where link_id = ?
-        and (path = ? or substr(path, 1, ?) = ?)
-        """, b, len(a) + 1, link_id, a, len(prefix), prefix)
     for string p in base.keys():
         if p == a or p.starts_with(prefix):
             done[p] = true
@@ -283,7 +345,7 @@ fn bool rebase_dir(int link_id, string a, string b, Json base, Dict<string, bool
     return true
 
 # Decide y hace lo que toque con una ruta que no es carpeta.
-fn bool sync_file(Json c, string root, string rid, string rel, Json L, Json R, Json S):
+fn bool sync_file(Json c, List<Json> q, string root, string rid, string rel, Json L, Json R, Json S):
     string full = os.path_join(root, rel)
 
     # Recién escrito: puede estar a medias. Se deja para la pasada siguiente.
@@ -336,7 +398,7 @@ fn bool sync_file(Json c, string root, string rid, string rel, Json L, Json R, J
         # Sólo en Drive. Nuevo, o cambiado después de que lo borrara yo: se baja.
         if S == null or rh != bh:
             return await pull(c, root, rel, R)
-        return await trash_remote(c, rel, str(R["id"]))
+        return await enqueue(q, { "op": "trash", "id": str(R["id"]) }, { "kind": "trash", "rel": rel })
 
     if S != null:
         await forget(int(c["link"]), rel)
@@ -348,7 +410,7 @@ fn Json sync_link(Json link):
     int lid = int(link["id"])
     string root = str(link["local_path"])
     string rid = str(link["remote_id"])
-    Json c = { "link": lid, "up": 0, "down": 0, "del_local": 0, "del_remote": 0, "conflicts": 0, "moved": 0, "errors": 0, "first_error": "", "offline": false }
+    Json c = { "link": lid, "run": str(lid) + "-" + str(time.now()), "up": 0, "down": 0, "del_local": 0, "del_remote": 0, "conflicts": 0, "moved": 0, "errors": 0, "first_error": "", "offline": false }
 
     Json tree = await remote_tree(rid)
     if not tree["ok"]:
@@ -405,9 +467,11 @@ fn Json sync_link(Json link):
     # el servidor crearía esas carpetas por su cuenta y luego saldrían duplicadas ("sub (2)").
     dirs.sort()
     Dict<string, string> made = {}
+    Dict<string, bool> pending = {}
     List<string> gone_local = []
     List<string> gone_remote = []
     Dict<string, bool> done = {}
+    List<Json> q = []
     Json gone_dirs = gone_dir_signatures(local, remote, base)
     for string rel in dirs:
         if done.has(rel):
@@ -423,31 +487,27 @@ fn Json sync_link(Json link):
                 made[rel] = str(R["id"])
             else if L != null:
                 if S == null:
-                    string parent_id = rid
+                    # Padre: el id de la carpeta, o «$ruta» si se crea en este mismo lote.
+                    string parent_ref = rid
                     if parent != "" and parent != ".":
-                        parent_id = made.get(parent, "")
-                    string old_path = ""
-                    if parent_id != "" or parent == "" or parent == ".":
-                        old_path = match_moved_dir(rel, local, gone_dirs, done)
-                    if old_path != "":
-                        # Renombrada o movida: una sola llamada, sus ficheros no se tocan.
-                        Json m = await remote_move(str(remote[old_path]["id"]), parent_id, os.path_basename(rel))
-                        if m["ok"]:
+                        parent_ref = made.get(parent, "")
+                        if parent_ref == "" and pending.has(parent):
+                            parent_ref = "$" + parent
+                    if parent_ref != "":
+                        string old_path = match_moved_dir(rel, local, gone_dirs, done)
+                        if old_path != "":
+                            # Renombrada o movida: una sola operación, sus ficheros no se tocan.
+                            await enqueue(q, { "op": "move", "id": str(remote[old_path]["id"]), "parent": parent_ref, "name": os.path_basename(rel) },
+                                { "kind": "movedir", "rel": rel, "from": old_path })
                             made[rel] = str(remote[old_path]["id"])
                             for string p in base.keys():
                                 if p.starts_with(old_path + "/") and base[p]["is_dir"]:
                                     made[rel + p.slice(len(old_path), len(p))] = str(remote[p]["id"])
-                            await rebase_dir(lid, old_path, rel, base, done)
-                            c["moved"] = int(c["moved"]) + 1
-                            continue
-                        await fail(c, rel, str(m["error"]))
-                    if parent_id != "" or parent == "" or parent == ".":
-                        Json r = await remote_mkdir(parent_id, os.path_basename(rel))
-                        if r["ok"]:
-                            made[rel] = str(r["body"]["id"])
-                            await remember(lid, rel, true, "", 0, 0, str(r["body"]["id"]))
+                            await mark_moved(old_path, rel, base, done)
                         else:
-                            await fail(c, rel, str(r["error"]))
+                            pending[rel] = true
+                            await enqueue(q, { "op": "mkdir", "parent": parent_ref, "name": os.path_basename(rel), "ref": rel },
+                                { "kind": "mkdir", "rel": rel })
                 else:
                     gone_remote.add(rel)
             else if R != null:
@@ -461,18 +521,23 @@ fn Json sync_link(Json link):
                 await forget(lid, rel)
         catch e:
             await fail(c, rel, e.message)
+    # Las carpetas van primero (y juntas) para que lo que se suba o se mueva después ya las tenga.
+    await flush_ops(c, q, made)
 
+    q = []
     try:
-        await detect_local_moves(c, root, rid, local, remote, base, made, done)
+        await detect_local_moves(q, root, rid, local, remote, base, made, done)
         await detect_remote_moves(c, root, local, remote, base, done)
     catch e:
         await fail(c, "movimientos", e.message)
+    await flush_ops(c, q, made)
 
+    q = []
     for string rel in files:
         if done.has(rel):
             continue
         try:
-            await sync_file(c, root, rid, rel, local.get(rel, null), remote.get(rel, null), base.get(rel, null))
+            await sync_file(c, q, root, rid, rel, local.get(rel, null), remote.get(rel, null), base.get(rel, null))
         catch e:
             await fail(c, rel, e.message)
 
@@ -499,11 +564,9 @@ fn Json sync_link(Json link):
             os.make_dir(os.path_join(root, rel))
             await forget(lid, rel)
         else:
-            Json r = await remote_trash(str(remote[rel]["id"]))
-            if r["ok"]:
-                await forget(lid, rel)
-            else:
-                await fail(c, rel, str(r["error"]))
+            await enqueue(q, { "op": "trash", "id": str(remote[rel]["id"]) }, { "kind": "trash", "rel": rel })
+    # Borrados y carpetas que desaparecieron de Drive, todo en un lote.
+    await flush_ops(c, q, made)
     return c
 
 # ---- el reloj ------------------------------------------------------------------

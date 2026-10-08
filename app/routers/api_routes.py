@@ -10,11 +10,11 @@ from __future__ import annotations
 from datetime import timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
-from .. import audit, files_service, shares_service, storage
+from .. import audit, files_service, shares_service, storage, sync_ops
 from ..auth import get_principal, require_action, require_user
 from ..config import get_config
 from ..database import get_db
@@ -413,6 +413,29 @@ def api_link(
         "expires_at": link.expires_at.isoformat() if link.expires_at else None,
         "mode": link.mode.value,
     }
+
+
+@router.post("/sync/ops")
+def sync_apply_ops(
+    payload: dict[str, Any] = Body(...),
+    principal: Principal = Depends(require_user),
+    db: DbSession = Depends(get_db),
+):
+    """Aplica de una vez una lista de operaciones de sincronización (mkdir, move, trash).
+
+    Cuerpo: ``{"run": "<id de la pasada>", "ops": [{"op", "key", ...}, ...]}``. Las
+    operaciones son idempotentes y atómicas una a una; se devuelve un resultado por
+    cada una y todo el lote se confirma junto. Ver ``app/sync_ops.py``.
+    """
+    _needs_scope(principal, "write")
+    ops = payload.get("ops")
+    if not isinstance(ops, list) or not all(isinstance(op, dict) for op in ops):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "«ops» debe ser una lista de operaciones.")
+    if len(ops) > sync_ops.MAX_OPS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Máximo {sync_ops.MAX_OPS} operaciones por lote.")
+    results = sync_ops.apply_ops(db, principal, ops, str(payload.get("run", ""))[:64], get_config())
+    db.commit()
+    return {"results": results}
 
 
 @router.get("/sync/tree")

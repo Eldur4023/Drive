@@ -379,6 +379,8 @@ DELETE /api/files/{id}?permanent=   a la papelera o definitivo
 POST   /api/files/{id}/restore      restaurar
 POST   /api/files/{id}/shares       compartir con un usuario
 POST   /api/files/{id}/links        crear un enlace
+POST   /api/sync/ops                lote de operaciones: mkdir, move, trash (cliente de escritorio)
+GET    /api/sync/tree?root_id=…     todo lo vivo bajo una carpeta, plano y con hash
 GET    /api/search?q=…              buscar
 GET    /api/usage                   cuota y consumo
 ```
@@ -392,6 +394,21 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Los ámbitos del token (`read`, `write`, `share`) se comprueban en cada llamada,
 así que un token de backup no puede borrar nada.
+
+**Operaciones por lotes.** `POST /api/sync/ops` recibe `{"run": "<id>", "ops": [...]}` con
+hasta 1000 operaciones que se aplican en orden y se confirman juntas. Cada una es atómica
+(se valida entera antes de tocar nada), idempotente (repetir un lote no duplica ni
+estropea nada) y deja rastro en la auditoría con el `run` y la `key` del cliente
+(eventos `mkdir`, `move` y `delete` con `via: sync`; hay que tenerlos en `audit.events`).
+Devuelve un resultado por operación, así que un fallo no corta el resto:
+
+```
+{"op": "mkdir", "key": "1", "parent": "<id>|$ref", "name": "sub", "ref": "a/sub"}   # reutiliza si ya existe
+{"op": "move",  "key": "2", "id": "<id>", "parent": "<id>|$ref", "name": "nuevo"}   # falla si el nombre está ocupado
+{"op": "trash", "key": "3", "id": "<id>"}                                          # a la papelera
+```
+
+`$ref` apunta a la carpeta que creó antes, en el mismo lote, el `mkdir` con esa `ref`.
 
 ---
 
