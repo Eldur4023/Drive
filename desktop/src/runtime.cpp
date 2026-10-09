@@ -383,7 +383,15 @@ int main(int argc, char** argv) {
         g_window = &*window;
     }
     install_window_control_hooks();
-    window->run("http://127.0.0.1:" + std::to_string(port) + "/");
+    // An app that guards its local API with a secret keeps it in `api-token` (mode 600) in its work dir; the page
+    // gets it in the URL fragment (never sent to the server) and puts it on every request.
+    std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
+    {
+        std::ifstream tok_file(work_dir / "api-token");
+        std::string tok;
+        if (tok_file >> tok && !tok.empty()) url += "#t=" + tok;
+    }
+    window->run(url);
     save_geometry(app_id, window->last_width(), window->last_height());
 
     // Destroy the window before waiting on the server: the webview keeps its
