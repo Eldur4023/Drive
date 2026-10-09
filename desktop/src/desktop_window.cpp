@@ -6,6 +6,16 @@
 #include <future>
 
 DesktopWindow::DesktopWindow(Options opts) {
+    if (opts.dark)
+        if (GtkSettings* settings = gtk_settings_get_default())
+            g_object_set(settings, "gtk-application-prefer-dark-theme", TRUE, nullptr);
+    // GDK puts WM_COMMAND on its X11 group-leader window, and KDE's ksmserver
+    // saves every window carrying it as a "legacy session" app and relaunches
+    // it at login -- outside the .desktop launcher (so a pinned taskbar icon
+    // never binds to that window) and racing any autostart launch.
+    if (GdkDisplay* display = gdk_display_get_default())
+        gdk_property_delete(gdk_display_get_default_group(display),
+                            gdk_atom_intern_static_string("WM_COMMAND"));
     auto w = webview_create(opts.devtools ? 1 : 0, nullptr);
     webview_set_title(w, opts.title.c_str());
     webview_set_size(w, opts.width, opts.height,
@@ -101,9 +111,10 @@ void DesktopWindow::maximize() {
 void DesktopWindow::restore() {
     webview_dispatch(static_cast<webview_t>(handle_),
         [](webview_t w, void*) {
-            auto* win = GTK_WINDOW(webview_get_window(w));
-            gtk_window_unmaximize(win);
-            gtk_window_deiconify(win);
+            // present(), not unmaximize()+deiconify(): this is "show the
+            // window" (second launch), and unmaximizing threw away a
+            // maximized window's size every time.
+            gtk_window_present(GTK_WINDOW(webview_get_window(w)));
         }, nullptr);
 }
 

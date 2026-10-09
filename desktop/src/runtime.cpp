@@ -339,7 +339,7 @@ int main(int argc, char** argv) {
     // It must only ever be reachable from this machine.
     const std::string& host = mod->program.app.host;
     if (host != "127.0.0.1" && host != "localhost" && host != "::1") {
-        std::cerr << "drive-sync: app.lux must declare `host \"127.0.0.1\"` (found \""
+        std::cerr << "luxdesktop: app.lux must declare `host \"127.0.0.1\"` (found \""
                   << host << "\"): the UI server is for this machine only.\n";
         return 1;
     }
@@ -369,6 +369,7 @@ int main(int argc, char** argv) {
     opts.width     = wcfg.width;
     opts.height    = wcfg.height;
     opts.resizable = wcfg.resizable;
+    opts.dark      = wcfg.dark;
     opts.devtools  = wcfg.devtools;
     opts.icon      = wcfg.icon;
     // A size the user already resized to on a previous run wins over the

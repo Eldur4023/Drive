@@ -20,6 +20,7 @@ public:
         int         width     = 1024;
         int         height    = 768;
         bool        resizable = true;
+        bool        dark      = false;
         bool        devtools  = false;
         std::string icon;             // path to an image file, or empty for none
     };

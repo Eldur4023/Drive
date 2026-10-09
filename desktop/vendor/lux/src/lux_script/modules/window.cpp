@@ -174,6 +174,7 @@ public:
             else if (key == "width")     cfg.width     = std::atoi(value.c_str());
             else if (key == "height")    cfg.height    = std::atoi(value.c_str());
             else if (key == "resizable") cfg.resizable = (value == "true");
+            else if (key == "dark")      cfg.dark      = (value == "true");
             else if (key == "devtools")  cfg.devtools  = (value == "true");
             else if (key == "icon")      cfg.icon      = value;
             else { error = "window: unknown option '" + key + "'"; return false; }
