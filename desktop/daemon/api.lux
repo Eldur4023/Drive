@@ -150,7 +150,10 @@ get endpoint("/api/remote/list"):
 # Baja un fichero a la ruta que eligió el usuario en el diálogo de guardar.
 post endpoint("/api/remote/download", Json body):
     await need_token()
-    string dest = str(body["dest"])
+    # Con `dest` (la ventana de escritorio ya preguntó) o, sin ella, lo que decida la plataforma (platform.lux).
+    string dest = body.has("dest") ? str(body["dest"]) : await pick_save_path(str(body["name"]))
+    if dest == "":
+        return { "ok": false, "cancelled": true }
     if not dest.starts_with("/") or not os.is_dir(os.path_dirname(dest)):
         return { "ok": false, "error": "ruta de destino no válida: " + dest }.status(400)
     Json r = await remote_download(str(body["id"]), dest)
@@ -162,7 +165,9 @@ post endpoint("/api/remote/download", Json body):
 # existe, Drive lo desambigua).
 post endpoint("/api/remote/upload", Json body):
     await need_token()
-    string path = str(body["path"])
+    string path = body.has("path") ? str(body["path"]) : await pick_open_path()
+    if path == "":
+        return { "ok": false, "cancelled": true }
     if not os.is_file(path):
         return { "ok": false, "error": "no existe el fichero: " + path }.status(400)
     Json r = await remote_upload(str(body["parent_id"]), os.path_basename(path), path, false)
@@ -176,6 +181,7 @@ post endpoint("/api/remote/link", Json body):
     Json r = await remote_link(str(body["id"]))
     if not r["ok"]:
         return { "ok": false, "error": r["error"] }.status(502)
+    await copy_text(str(r["body"]["url"]))   # en escritorio lo copia la ventana al recibir la respuesta
     return { "ok": true, "url": r["body"]["url"] }
 
 post endpoint("/api/remote/share", Json body):
@@ -189,4 +195,28 @@ post endpoint("/api/remote/share", Json body):
     Json r = await remote_share(str(body["id"]), user, perm)
     if not r["ok"]:
         return { "ok": false, "error": r["error"] }.status(502)
+    return { "ok": true }
+
+# Los selectores de carpetas y la web de Drive: en escritorio los hace la ventana (otra app); aquí, la plataforma.
+post endpoint("/api/pick-folder"):
+    await need_token()
+    return { "path": await pick_folder_path() }
+
+# La dirección de un elemento en la web de Drive (compartir, versiones, papelera…); la página la abre.
+post endpoint("/api/open-web", Json body):
+    await need_token()
+    string url = await server_url()
+    if not (url.starts_with("http://") or url.starts_with("https://")):
+        return { "ok": false }.status(400)
+    string id = str(body["id"])
+    string target = url + "/files"
+    if id != "":
+        target = target + "/" + id
+    return { "ok": true, "url": target }
+
+# Una pasada del reloj del servicio (ver tick() en sync.lux): en Android la llama la alarma que despierta
+# el móvil, porque el proceso duerme y `every` no basta.
+post endpoint("/api/tick"):
+    await need_token()
+    await tick()
     return { "ok": true }

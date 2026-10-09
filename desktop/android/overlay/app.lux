@@ -1,0 +1,40 @@
+# Drive para Android: el servicio (daemon/) y la interfaz (app/public) en un solo proceso.
+# Sustituye a daemon/app.lux al montar la app del móvil (CMakeLists.txt). En escritorio la ventana es
+# otra app que habla con el servicio por HTTP; aquí el servicio sirve también la interfaz.
+
+import sqlite
+import os
+import time
+import json
+import http
+import hash
+import window
+
+app:
+    name   "Drive Sync"
+    port   env("DRIVE_SYNC_PORT", "7878")
+    # Sólo este teléfono. Otras apps del teléfono pueden abrir el puerto, así que la API exige además el secreto
+    # de `api-token` (cabecera X-Drive-Sync-Token): la actividad lo lee y se lo pasa a la página.
+    host   "127.0.0.1"
+    max_body "1MB"
+
+    log:
+        level "info"
+        access false
+
+    sqlite:
+        file env("DRIVE_SYNC_DB", "./state.db")
+        pool 2
+
+    static "/" -> "./public" spa
+
+# Rutas que en escritorio son de la ventana (icono de bandeja, abrir una carpeta en el gestor de ficheros,
+# actualizaciones desde GitHub): aquí no hay nada que hacer.
+post endpoint("/api/chrome"):
+    return status(204)
+
+post endpoint("/api/open"):
+    return { "ok": false }.status(404)
+
+get endpoint("/api/update"):
+    return { "available": false }

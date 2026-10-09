@@ -46,6 +46,31 @@ Drive: *Perfil → Tokens de API*, con los ámbitos `read` y `write`), y pulsa
 El servicio arranca con la máquina (`systemctl status drive-sync`, registro en
 `journalctl -u drive-sync -f`). Cerrar la ventana no lo para.
 
+## Android
+
+La APK lleva dentro el mismo servicio y la misma interfaz, en un solo proceso: un `WebView` carga la página por loopback y el servicio habla con tu
+Drive por HTTP (la dirección es la de siempre; para un Drive en tu servidor, por Tailscale, el móvil necesita la VPN activa).
+
+```bash
+export ANDROID_NDK=...                                   # r26+, API mínima 28
+tools/android-build.sh arm64-v8a x86_64                  # OpenSSL + curl + SQLite + libluxlocal.so por ABI
+cd android && gradle assembleDebug                       # JDK 17, Gradle 8.7, SDK 34 (sdk.dir en local.properties)
+```
+
+- **Cómo se monta** (`CMakeLists.txt`, rama `ANDROID`): el servicio (`daemon/`) y la interfaz (`app/public/`) se juntan en una sola app Lux;
+  `android/overlay/` sustituye lo que difiere (`app.lux`: sirve también la interfaz; `platform.lux`: selectores y portapapeles de Android).
+  En escritorio esos selectores los resuelve la ventana *antes* de llamar al servicio; en Android el servicio los pide al sistema con `window.*`
+  (`src/android.cpp` → `LuxLocal.kt`).
+- **Almacenamiento**: para sincronizar carpetas reales y guardar descargas en *Descargas* la app pide **«Acceso a todos los archivos»** (la primera vez que se abre).
+  Las carpetas se eligen con el selector del sistema (se convierte a la ruta real del almacenamiento compartido); lo que subes se copia primero a la caché.
+- **API local**: otras apps del teléfono pueden abrir el puerto de loopback, así que la API exige el secreto de `api-token` (cabecera `X-Drive-Sync-Token`);
+  la actividad lo lee de su carpeta privada y se lo pasa a la página en `#t=…`.
+- **Sincronización con la app cerrada**: sin servicio en primer plano ni notificación fija, una cadena de alarmas que despiertan el móvil llama cada 2 minutos a
+  `POST /api/tick` (la misma pasada que el reloj de 5 s del servicio: mira el disco y sólo habla con Drive si hay algo que hacer o toca el sondeo).
+  Con la excepción de batería la alarma es exacta; en Doze profundo Android puede espaciarlas. Un fichero nuevo en Drive llega al teléfono en unos minutos.
+- Interfaz móvil: cabecera compacta, pestañas a todo el ancho, «atrás» sube una carpeta o cierra un diálogo; el menú de compartir/enlace/abrir en la web debería abrirse con una pulsación larga sobre un fichero (sin probar en el teléfono).
+- Sin probar: carpetas en una tarjeta SD, ficheros muy grandes, y un Drive real por Tailscale (se probó contra un Drive local desde el emulador).
+
 ## Actualizar
 
 Al abrir la ventana se compara el commit instalado con GitHub (`git fetch` en el

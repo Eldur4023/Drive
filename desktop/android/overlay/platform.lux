@@ -1,0 +1,18 @@
+# Android: los selectores y el portapapeles los pide el propio servicio al sistema (window.* → src/android.cpp
+# → LuxLocal.kt). Sustituye a daemon/platform.lux al montar la app del móvil (CMakeLists.txt).
+
+# Dónde guardar una descarga: la carpeta pública Descargas (sin diálogo; pide «acceso a todos los archivos»).
+fn string pick_save_path(string name):
+    return await window.save_file(name)
+
+# Qué fichero subir: el selector del sistema; lo elegido se copia a la caché y se sube desde ahí.
+fn string pick_open_path():
+    return await window.open_file()
+
+# Qué carpeta del almacenamiento compartido sincronizar.
+fn string pick_folder_path():
+    return await window.open_folder()
+
+fn bool copy_text(string text):
+    window.clipboard_write(text)
+    return true

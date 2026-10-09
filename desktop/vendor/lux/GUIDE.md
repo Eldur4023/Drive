@@ -230,6 +230,22 @@ whatever directory that launcher happened to start in (which, for a database fil
 silently creating and using an empty one — no error, since a missing sqlite file is normally
 just a fresh database). An absolute path, or one built from `env(...)`, is never touched.
 
+**HTTPS.** A top-level `tls:` block, next to `app:`, makes the app's port speak HTTPS; without it the port is plain HTTP.
+
+```
+tls:
+    cert "fullchain.pem"
+    key  "privkey.pem"
+```
+
+With `cert` and `key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
+so no reverse proxy is needed for it. It is a build option, `cmake -DLUX_TLS=ON` (needs `libssl-dev`);
+a binary without it refuses to start with a `tls:` block instead of serving plain HTTP. Measured on 8
+cores against nginx in front: Lux alone ~125k req/s on a small route, nginx + keep-alive to Lux ~60k,
+nginx with its default `proxy_pass` ~21k. Not included: HTTP/2, a plain-HTTP-to-HTTPS redirect on
+another port (that is one `return 301` in whatever listens on 80) and certificate reload (restart
+after a renewal). A static file is encrypted in user space (pread + OpenSSL) unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM: then Lux hands the encryption to the kernel (kTLS) and the file goes out through `sendfile`, about 20% more requests per second on a 30 KB file in a local test. Without the module nothing breaks, it just stays in user space.
+
 `spa` on a static mount makes routes that are not found fall back to `index.html`. A directory
 request (`/docs` or `/docs/`) serves that directory's own `index.html` if it has one, same as
 any other static file server — not the mount's root page. `index.html` itself is always sent
@@ -417,7 +433,7 @@ alongside `"true"`/`"false"`/`"1"`/`"0"`, since `"on"` is the literal value an H
 `<input type="checkbox">` sends when checked and given no explicit `value=`.
 
 More of the request: `request.query` (the raw query string, without the `?`), `request.host`,
-`request.scheme` (`"https"` only when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
+`request.scheme` (`"https"` when Lux serves TLS itself, or when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
 `request.headers` (a `Dict`, lowercase keys). A field that repeats (several checkboxes with one
 `name`) gives its last value with `form("x")` / `query("x")`; `form_list("x")` and `query_list("x")`
 return every value, in order, as a `List<string>` (empty if absent).
@@ -1666,6 +1682,7 @@ variable another call site happens to pass for the same file.
 | `'sse' only exists inside an sse route` | A reserved object out of context |
 | `a ws route needs origins(...)` | The origin allowlist is missing |
 | `cannot add int and string` | An operation between different types |
+| `'a' is declared int but is initialized with string` | A declaration, assignment or `return` whose value does not match the declared type (`LUX_SCRIPT-GRAMMAR.md` §21) |
 | `the session is not configured` | `session: secret ...` is missing from `app:` |
 | `'X' is not declared` | An unknown name, inside `validate` too |
 

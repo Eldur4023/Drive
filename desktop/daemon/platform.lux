@@ -1,0 +1,16 @@
+# Lo que cambia según dónde corre el servicio. En escritorio los selectores (dónde guardar, qué subir,
+# qué carpeta enlazar) y el portapapeles son cosa de la ventana, que los resuelve ANTES de llamar a la
+# API: aquí no hacen nada. En Android (android/overlay/platform.lux, que sustituye a este fichero)
+# no hay otra app: el propio servicio los pide al sistema con `window.*`.
+
+fn string pick_save_path(string name):
+    return ""
+
+fn string pick_open_path():
+    return ""
+
+fn string pick_folder_path():
+    return ""
+
+fn bool copy_text(string text):
+    return false

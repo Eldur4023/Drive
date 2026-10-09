@@ -5,8 +5,16 @@
   var esc = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); };
   var icon = function (n) { return '<svg class="ico"><use href="#i-' + n + '"/></svg>'; };
 
+  // Android: la actividad abre la página con #t=<secreto de la API local> (otras apps del teléfono pueden abrir el puerto).
+  var TOKEN = (function () {
+    var m = /[#&]t=([^&]+)/.exec(location.hash);
+    try { if (m) { sessionStorage.setItem("driveTok", m[1]); history.replaceState(null, "", location.pathname + location.search); } return sessionStorage.getItem("driveTok") || ""; }
+    catch (e) { return m ? m[1] : ""; }
+  })();
+
   function api(method, path, body) {
     var opts = { method: method, headers: {} };
+    if (TOKEN) { opts.headers["X-Drive-Sync-Token"] = TOKEN; }
     if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
     return fetch(path, opts).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
@@ -144,6 +152,10 @@
     });
   }
   $("f-crumbs").onclick = function (e) { var b = e.target.closest("button"); if (b) { files.stack = files.stack.slice(0, +b.dataset.i + 1); msg(""); loadFiles(); } };
+  // En escritorio la ventana abre el navegador y no devuelve URL; en Android el servicio la devuelve y la abre la página.
+  function openWeb(id) {
+    api("POST", "/api/open-web", { id: id }).then(function (r) { if (r.ok && r.body.url) { window.open(r.body.url, "_blank"); } });
+  }
   function download(tr) {
     msg("Descargando «" + tr.dataset.name + "»…");
     api("POST", "/api/remote/download", { id: tr.dataset.id, name: tr.dataset.name }).then(function (r) {
@@ -175,7 +187,7 @@
   var ctxActions = {
     open: openDir,
     download: download,
-    web: function (tr) { api("POST", "/api/open-web", { id: tr.dataset.id }); },
+    web: function (tr) { openWeb(tr.dataset.id); },
     link: function (tr) {
       msg("Creando enlace…");
       api("POST", "/api/remote/link", { id: tr.dataset.id }).then(function (r) {
@@ -242,7 +254,7 @@
       });
     });
   };
-  $("f-web").onclick = function () { api("POST", "/api/open-web", { id: files.stack[files.stack.length - 1].id }); };
+  $("f-web").onclick = function () { openWeb(files.stack[files.stack.length - 1].id); };
 
   // ---------------------------------------------------------------- ajustes
   $("btn-settings").onclick = function () {
@@ -383,6 +395,14 @@
         });
       }, 1500);
     });
+  };
+
+  // Android: «atrás» (el Activity llama a luxBack): cierra un diálogo o sube una carpeta en el explorador.
+  window.luxBack = function () {
+    var dlg = document.querySelector("dialog[open]");
+    if (dlg) { dlg.close(); return true; }
+    if (!$("files-section").hidden && files.stack.length > 1) { files.stack.pop(); msg(""); loadFiles(); return true; }
+    return false;
   };
 
   api("POST", "/api/chrome");
