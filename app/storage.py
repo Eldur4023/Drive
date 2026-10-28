@@ -109,11 +109,17 @@ def sanitize_name(name: str) -> str:
 
     No protege el sistema de ficheros —los blobs ya son opacos— pero evita
     nombres que confundirían al descargar (``../``, saltos de línea, nulos).
+    Los puntos de los extremos se respetan: ``.git``, ``.gitignore`` o ``.env``
+    son nombres legítimos y quitarles el punto rompía las carpetas sincronizadas
+    (``.git`` pasaba a ``git``). Sólo se rechazan ``.``, ``..`` y los nombres
+    hechos únicamente de puntos.
     """
     name = name.replace("\\", "/").split("/")[-1]
     name = "".join(c for c in name if c.isprintable() and c not in '\r\n\t\0')
-    name = name.strip().strip(".")
-    return (name or "sin-nombre")[:255]
+    name = name.strip()
+    if not name.strip("."):
+        return "sin-nombre"
+    return name[:255]
 
 
 # --------------------------------------------------------------------------- #

@@ -135,3 +135,32 @@ def test_las_operaciones_dejan_rastro_en_la_auditoria(client):
         filas = db.scalars(select(AuditLog).where(AuditLog.event.in_(["mkdir", "move", "delete"]))).all()
         vistos = {(f.event, f.detail.get("key"), f.detail.get("run")) for f in filas if f.detail.get("via") == "sync"}
     assert vistos == {("mkdir", "k1", "pasada-42"), ("move", "k2", "pasada-42"), ("delete", "k3", "pasada-42")}
+
+
+def test_los_nombres_con_punto_se_respetan(client):
+    """`.git`, `.gitignore`… no pierden el punto inicial (antes `.git` pasaba a `git`)."""
+    register(client, "ana")
+    login(client, "ana")
+    raiz = client.post("/api/folders", data={"name": "proyecto"}).json()["id"]
+
+    res = ops(
+        client,
+        {"op": "mkdir", "key": "g", "parent": raiz, "name": ".git", "ref": "g"},
+        {"op": "mkdir", "key": "o", "parent": "$g", "name": "objects"},
+    )
+    assert [r["ok"] for r in res] == [True, True]
+    rutas = set(tree(client))
+    assert {"proyecto/.git", "proyecto/.git/objects"} <= rutas
+    assert "proyecto/git" not in rutas
+
+
+def test_sanitize_name_solo_rechaza_puntos_vacios():
+    from app.storage import sanitize_name
+
+    assert sanitize_name(".git") == ".git"
+    assert sanitize_name(".gitignore") == ".gitignore"
+    assert sanitize_name("a/b/.env") == ".env"            # sólo cuenta el último tramo
+    assert sanitize_name("informe.") == "informe."
+    for malo in ("", "  ", ".", "..", "..."):
+        assert sanitize_name(malo) == "sin-nombre"
+    assert sanitize_name("a\nb\0c") == "abc"
